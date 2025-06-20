@@ -1,0 +1,15 @@
+{
+  "name": "shopify-admin-proxy",
+  "version": "1.0.0",
+  "description": "A lightweight proxy for Shopify admin API",
+  "main": "order-admin-api.js",
+  "scripts": {
+    "start": "node order-admin-api.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
