@@ -6,7 +6,7 @@ require('dotenv').config();
 const app = express();
 app.use(cors());
 
-// 🔐 Optional: API key check
+// 🔐 API key security check
 app.use((req, res, next) => {
   if (req.headers['x-api-key'] !== process.env.FRONTEND_SECRET) {
     return res.status(403).send('Forbidden');
@@ -14,7 +14,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🔄 Example orders endpoint (replace with real Shopify logic later)
+// 🩺 Health check route (for Render + testing)
+app.get('/health', (req, res) => {
+  res.send('ok');
+});
+
+// 🔄 Orders endpoint (replace with real Shopify data later)
 app.get('/orders', async (req, res) => {
   res.json({
     orders: [],
@@ -24,6 +29,7 @@ app.get('/orders', async (req, res) => {
   });
 });
 
+// 🚀 Start the server (Render needs this exact format)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Proxy server running on port ${PORT}`);
