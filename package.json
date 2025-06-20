@@ -4,7 +4,7 @@
   "description": "A lightweight proxy for Shopify admin API",
   "main": "order-admin-api.js",
   "scripts": {
-    "start": "node order-admin-api.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
