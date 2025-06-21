@@ -1,29 +1,29 @@
 /* ------------------------------------------------------------------
-   Shopify Order Proxy  –  server.js (GraphQL version)
+   Shopify Order Proxy – server.js  (GraphQL-only, PII-safe)
    ------------------------------------------------------------------
-   ▸ Loads creds from .env / Render Service Vars
-   ▸ Secure x-api-key check
-   ▸ /health          – for uptime pings
-   ▸ /orders          – latest 50 orders with metafields
-------------------------------------------------------------------- */
+   ▸ Loads creds from env (.env in dev, Service Vars in prod)
+   ▸ Simple x-api-key header check
+   ▸ /health    – uptime ping
+   ▸ /orders    – newest 50 orders  (?cursor=xxxx for next page)
+   ------------------------------------------------------------------ */
 
-import express from 'express';
-import axios from 'axios';
-import cors from 'cors';
-import dotenv from 'dotenv';
+import express  from "express";
+import axios    from "axios";
+import cors     from "cors";
+import dotenv   from "dotenv";
 dotenv.config();
 
 /* ---------- ENV -------------------------------------------------- */
 const {
-  SHOPIFY_STORE_URL,        // like "nc0j5n-wa.myshopify.com" (NO https://)
-  SHOPIFY_ACCESS_TOKEN,
-  SHOPIFY_API_VERSION = '2024-07',
-  FRONTEND_SECRET,
+  SHOPIFY_STORE_URL,        // e.g. mystore.myshopify.com (NO https://)
+  SHOPIFY_ACCESS_TOKEN,     // Admin API token
+  SHOPIFY_API_VERSION = "2024-04",
+  FRONTEND_SECRET,          // value your FE sends in x-api-key
   PORT = 10000
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error('❌ Missing env vars – check SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET');
+  console.error("❌  Missing env vars – set SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
   process.exit(1);
 }
 
@@ -31,21 +31,21 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
 const app = express();
 app.use(cors());
 
-/* ---------- Tiny Auth Middleware -------------------------------- */
+/* ---------- Tiny auth ------------------------------------------- */
 app.use((req, res, next) => {
-  if (req.headers['x-api-key'] !== FRONTEND_SECRET) {
-    return res.status(403).send('Forbidden – invalid API key');
+  if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
+    return res.status(403).send("Forbidden – bad API key");
   }
   next();
 });
 
-/* ---------- Health Route ---------------------------------------- */
-app.get('/health', (_, res) => res.send('OK ✅'));
+/* ---------- Health Check ---------------------------------------- */
+app.get("/health", (_, res) => res.send("OK ✅"));
 
-/* ---------- Orders Route (GraphQL) ------------------------------ */
-app.get('/orders', async (req, res) => {
-  const afterCursor = req.query.cursor || null;
-  const first = 50;
+/* ---------- /orders (GraphQL, cursor paging) -------------------- */
+app.get("/orders", async (req, res) => {
+  const afterCursor = req.query.cursor || null;   // ?cursor=xxxx
+  const first       = 50;                         // Shopify max 250
 
   const query = `
     query getOrders($first: Int!, $after: String) {
@@ -58,25 +58,9 @@ app.get('/orders', async (req, res) => {
             createdAt
             displayFinancialStatus
             displayFulfillmentStatus
-            totalPriceSet {
-              shopMoney {
-                amount
-                currencyCode
-              }
-            }
-            customer {
-              firstName
-              lastName
-              email
-            }
-            metafields(first: 20, namespace: "custom") {
-              edges {
-                node {
-                  key
-                  value
-                  type
-                }
-              }
+            totalPriceSet { shopMoney { amount currencyCode } }
+            metafields(first: 20, namespace: \"custom\") {
+              edges { node { key value type } }
             }
           }
         }
@@ -98,52 +82,50 @@ app.get('/orders', async (req, res) => {
       { query, variables },
       {
         headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          "Content-Type"          : "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
         }
       }
     );
 
+    /* ----- GraphQL-level errors -------------------------------- */
     if (data.errors) {
-      console.error('🔴 Shopify GraphQL returned errors:', JSON.stringify(data.errors, null, 2));
+      console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
       return res.status(502).json({ errors: data.errors });
     }
 
     const shopifyOrders = data.data.orders;
     const orders = shopifyOrders.edges.map(({ cursor, node }) => {
       const metafields = {};
-      node.metafields.edges.forEach(mf => {
-        metafields[mf.node.key] = mf.node.value;
-      });
+      node.metafields.edges.forEach(mf => { metafields[mf.node.key] = mf.node.value; });
 
       return {
         cursor,
-        id: node.id,
-        name: node.name,
+        id        : node.id,
+        name      : node.name,
         created_at: node.createdAt,
-        financial_status: node.displayFinancialStatus,
+        financial_status  : node.displayFinancialStatus,
         fulfillment_status: node.displayFulfillmentStatus,
         total_price: node.totalPriceSet.shopMoney.amount,
-        currency: node.totalPriceSet.shopMoney.currencyCode,
-        customer: node.customer,
+        currency   : node.totalPriceSet.shopMoney.currencyCode,
         metafields
       };
     });
 
     res.json({
       orders,
-      count: orders.length,
-      next_cursor: shopifyOrders.pageInfo.hasNextPage ? shopifyOrders.pageInfo.endCursor : null,
+      count      : orders.length,
+      next_cursor: shopifyOrders.pageInfo.hasNextPage      ? shopifyOrders.pageInfo.endCursor   : null,
       prev_cursor: shopifyOrders.pageInfo.hasPreviousPage ? shopifyOrders.pageInfo.startCursor : null
     });
 
   } catch (err) {
-    console.error('🔴 Shopify GraphQL error (network/axios):', err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to fetch orders via GraphQL' });
+    console.error("🔴  Shopify GraphQL error (network/axios):", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders via GraphQL" });
   }
 });
 
-/* ---------- Start Server ---------------------------------------- */
+/* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
-  console.log(`✅ Shopify proxy is running → http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
+  console.log(`✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
