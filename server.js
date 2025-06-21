@@ -1,37 +1,37 @@
 /* ------------------------------------------------------------------
-   Shopify Order Proxy  –  server.js  (GraphQL, Cursor-Paged)
+   Shopify Order Proxy  –  server.js (GraphQL version)
    ------------------------------------------------------------------
-   ▸ Uses Shopify GraphQL API (2024-04 or later)
-   ▸ Handles authentication via x-api-key
-   ▸ /health            – uptime ping
-   ▸ /orders            – latest 50 orders + metafields (cursor-ready)
+   ▸ Loads creds from .env / Render Service Vars
+   ▸ Secure x-api-key check
+   ▸ /health          – for uptime pings
+   ▸ /orders          – latest 50 orders with metafields
 ------------------------------------------------------------------- */
 
-import express  from 'express';
-import axios    from 'axios';
-import cors     from 'cors';
-import dotenv   from 'dotenv';
+import express from 'express';
+import axios from 'axios';
+import cors from 'cors';
+import dotenv from 'dotenv';
 dotenv.config();
 
 /* ---------- ENV -------------------------------------------------- */
 const {
-  SHOPIFY_STORE_URL,        // yourstore.myshopify.com (no https://)
-  SHOPIFY_ACCESS_TOKEN,     // Shopify Admin API token
-  SHOPIFY_API_VERSION = '2024-04',
-  FRONTEND_SECRET,          // same value frontend sends in x-api-key
+  SHOPIFY_STORE_URL,        // like "nc0j5n-wa.myshopify.com" (NO https://)
+  SHOPIFY_ACCESS_TOKEN,
+  SHOPIFY_API_VERSION = '2024-07',
+  FRONTEND_SECRET,
   PORT = 10000
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error('❌ Missing required env vars → SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET');
+  console.error('❌ Missing env vars – check SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET');
   process.exit(1);
 }
 
-/* ---------- INIT ------------------------------------------------- */
+/* ---------- APP -------------------------------------------------- */
 const app = express();
 app.use(cors());
 
-/* ---------- Middleware: API Key Auth ----------------------------- */
+/* ---------- Tiny Auth Middleware -------------------------------- */
 app.use((req, res, next) => {
   if (req.headers['x-api-key'] !== FRONTEND_SECRET) {
     return res.status(403).send('Forbidden – invalid API key');
@@ -39,13 +39,13 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- /health --------------------------------------------- */
+/* ---------- Health Route ---------------------------------------- */
 app.get('/health', (_, res) => res.send('OK ✅'));
 
-/* ---------- /orders (GraphQL with cursor pagination) ------------ */
+/* ---------- Orders Route (GraphQL) ------------------------------ */
 app.get('/orders', async (req, res) => {
   const afterCursor = req.query.cursor || null;
-  const first       = 50;
+  const first = 50;
 
   const query = `
     query getOrders($first: Int!, $after: String) {
@@ -56,8 +56,8 @@ app.get('/orders', async (req, res) => {
             id
             name
             createdAt
-            financialStatus
-            fulfillmentStatus
+            displayFinancialStatus
+            displayFulfillmentStatus
             totalPriceSet {
               shopMoney {
                 amount
@@ -110,11 +110,10 @@ app.get('/orders', async (req, res) => {
     }
 
     const shopifyOrders = data.data.orders;
-
     const orders = shopifyOrders.edges.map(({ cursor, node }) => {
       const metafields = {};
-      node.metafields.edges.forEach(({ node: mf }) => {
-        metafields[mf.key] = mf.value;
+      node.metafields.edges.forEach(mf => {
+        metafields[mf.node.key] = mf.node.value;
       });
 
       return {
@@ -122,8 +121,8 @@ app.get('/orders', async (req, res) => {
         id: node.id,
         name: node.name,
         created_at: node.createdAt,
-        financial_status: node.financialStatus,
-        fulfillment_status: node.fulfillmentStatus,
+        financial_status: node.displayFinancialStatus,
+        fulfillment_status: node.displayFulfillmentStatus,
         total_price: node.totalPriceSet.shopMoney.amount,
         currency: node.totalPriceSet.shopMoney.currencyCode,
         customer: node.customer,
@@ -144,7 +143,7 @@ app.get('/orders', async (req, res) => {
   }
 });
 
-/* ---------- Start ----------------------------------------------- */
+/* ---------- Start Server ---------------------------------------- */
 app.listen(PORT, () => {
-  console.log(`✅ Shopify proxy running at http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
+  console.log(`✅ Shopify proxy is running → http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
 });
