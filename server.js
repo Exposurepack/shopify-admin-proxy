@@ -1,11 +1,11 @@
 /* ------------------------------------------------------------------
-   Shopify Order Proxy  –  server.js  (cursor-ready, 100% working)
+   Shopify Order Proxy  –  server.js  (cursor paging  +  metafields)
    ------------------------------------------------------------------
-   ▸ Loads creds from Render/Lambda env-vars  (.env in local dev)
-   ▸ x-api-key header check (same key front-end sends)
-   ▸ /health              – uptime ping
-   ▸ /orders              – newest 50 orders, incl. customer details
-   ▸ /orders?page_info=…  – cursor paging (Shopify REST)
+   ▸ Reads env-vars (Render / fly.io / Heroku) – .env in local dev
+   ▸ x-api-key middleware
+   ▸ /health                 → uptime ping
+   ▸ /orders                 → newest 50 orders + custom metafields
+   ▸ /orders?page_info=…     → follow Shopify cursor (REST)
 ------------------------------------------------------------------- */
 
 import express from 'express';
@@ -17,16 +17,16 @@ dotenv.config();
 /* ---------- ENV -------------------------------------------------- */
 
 const {
-  SHOPIFY_STORE_URL,          // “mystore.myshopify.com”
+  SHOPIFY_STORE_URL,          // mystore.myshopify.com
   SHOPIFY_ACCESS_TOKEN,       // Admin-API token
   SHOPIFY_API_VERSION = '2024-04',
-  FRONTEND_SECRET,            // the key your FE sends in x-api-key
-  PORT = 10000                // Render’s port or local fallback
+  FRONTEND_SECRET,            // FE sends this in x-api-key
+  PORT = 10000
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   console.error(
-    '❌  Missing env vars → need SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET'
+    '❌  Missing env vars – need SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET'
   );
   process.exit(1);
 }
@@ -48,23 +48,15 @@ app.use((req, res, next) => {
 /* ---------- Helpers --------------------------------------------- */
 
 function extractCursors(linkHeader = '') {
-  /*  Shopify returns something like:
-      <https://…orders.json?page_info=abcd&limit=50>; rel="next",
-      <https://…orders.json?page_info=wxyz&limit=50>; rel="previous"
-  */
   const cursors = { next: null, prev: null };
-
-  linkHeader.split(',').forEach((entry) => {
-    const [urlPart, relPart] = entry.split(';').map((s) => s.trim());
+  linkHeader.split(',').forEach(entry => {
+    const [urlPart, relPart] = entry.split(';').map(s => s.trim());
     if (!urlPart || !relPart) return;
-
     const match = urlPart.match(/page_info=([^&>]+)/);
     if (!match) return;
-
-    if (relPart.includes('rel="next"')) cursors.next = match[1];
+    if (relPart.includes('rel="next"'))     cursors.next = match[1];
     if (relPart.includes('rel="previous"')) cursors.prev = match[1];
   });
-
   return cursors;
 }
 
@@ -73,12 +65,14 @@ function extractCursors(linkHeader = '') {
 // 1) Health check
 app.get('/health', (_, res) => res.send('OK ✅'));
 
-// 2) Orders (cursor paging)
+// 2) Orders (cursor paging + metafields)
 app.get('/orders', async (req, res) => {
-  const { page_info } = req.query;     // optional cursor
-  const limit = 50;                    // Shopify max 250
+  const { page_info } = req.query;   // optional cursor
+  const limit = 50;                  // Shopify max 250
 
   try {
+    /* -------- 1. Grab the order list --------------------------- */
+
     const { data, headers } = await axios.get(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json`,
       {
@@ -103,11 +97,43 @@ app.get('/orders', async (req, res) => {
       }
     );
 
+    /* -------- 2. Fetch metafields for each order --------------- */
+
+    const ordersWithMeta = await Promise.all(
+      data.orders.map(async (order) => {
+        try {
+          const mfRes = await axios.get(
+            `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${order.id}/metafields.json`,
+            {
+              headers: { 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN },
+              params : { namespace: 'custom', limit: 250 }   // adjust if you use a different namespace
+            }
+          );
+
+          // Reduce the array into a simple { key: value } object
+          const customMetafields = {};
+          mfRes.data.metafields.forEach(mf => {
+            customMetafields[mf.key] = mf.value;
+          });
+
+          return { ...order, customMetafields };
+
+        } catch (mfErr) {
+          console.error(`⚠️  Could not load metafields for order ${order.name}`, mfErr.message);
+          return { ...order, customMetafields: {} };
+        }
+      })
+    );
+
+    /* -------- 3. Pagination cursors ---------------------------- */
+
     const { next: next_cursor, prev: prev_cursor } = extractCursors(headers.link);
 
+    /* -------- 4. Respond --------------------------------------- */
+
     res.json({
-      orders : data.orders,
-      count  : data.orders.length,
+      orders: ordersWithMeta,
+      count : ordersWithMeta.length,
       next_cursor,
       prev_cursor
     });
@@ -121,5 +147,5 @@ app.get('/orders', async (req, res) => {
 /* ---------- Start ----------------------------------------------- */
 
 app.listen(PORT, () => {
-  console.log(`✅  Shopify proxy running on http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
+  console.log(`✅  Shopify proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
