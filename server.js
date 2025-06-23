@@ -1,10 +1,5 @@
 /* ------------------------------------------------------------------
-   Shopify Order Proxy – server.js  (GraphQL-only, PII-safe)
-   ------------------------------------------------------------------
-   ▸ Loads creds from env (.env in dev, Service Vars in prod)
-   ▸ Simple x-api-key header check
-   ▸ /health  – uptime ping
-   ▸ /orders  – newest 50 orders  (?cursor=xxxx for next page)
+   Shopify Order Proxy – HYBRID (REST for address, GraphQL for metafields)
    ------------------------------------------------------------------ */
 
 import express from "express";
@@ -15,10 +10,10 @@ dotenv.config();
 
 /* ---------- ENV -------------------------------------------------- */
 const {
-  SHOPIFY_STORE_URL,        // mystore.myshopify.com  (NO https://)
-  SHOPIFY_ACCESS_TOKEN,     // Admin-API token
+  SHOPIFY_STORE_URL,            // mystore.myshopify.com  (NO https://)
+  SHOPIFY_ACCESS_TOKEN,         // Admin-API token
   SHOPIFY_API_VERSION = "2024-04",
-  FRONTEND_SECRET,          // value FE sends in x-api-key
+  FRONTEND_SECRET,              // value FE sends in x-api-key
   PORT = 10000
 } = process.env;
 
@@ -42,52 +37,43 @@ app.use((req, res, next) => {
 /* ---------- Health Check ---------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
-/* ---------- /orders (GraphQL, cursor paging) -------------------- */
+/* ---------- /orders (HYBRID) ------------------------------------ */
 app.get("/orders", async (req, res) => {
-  const afterCursor = req.query.cursor || null;   // ?cursor=xxxx
-  const first       = 50;                         // Shopify max 250
+  /* REST paging – use since_id like a cursor */
+  const sinceId = req.query.since_id || 0;    // FE will pass ?since_id=123…
 
-  const query = /* GraphQL */ `
-    query getOrders($first: Int!, $after: String) {
-      orders(first: $first, after: $after, reverse: true) {
-        edges {
-          cursor
-          node {
+  /* --- 1️⃣  REST: order stub + shipping address ---------------- */
+  const restURL = `https://${SHOPIFY_STORE_URL}` +
+    `/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
+    `?limit=50&since_id=${sinceId}&status=any&order=created_at%20desc` +
+    `&fields=id,name,created_at,financial_status,fulfillment_status,` +
+    `total_price,currency,shipping_address`;
+
+  try {
+    const restRes = await axios.get(restURL, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
+    });
+    const restOrders = restRes.data.orders;
+
+    /* Collect GIDs for GraphQL */
+    const gids = restOrders.map(o => `"gid://shopify/Order/${o.id}"`);
+
+    /* --- 2️⃣  GraphQL: only custom metafields ------------------ */
+    const gql = `
+      query meta($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on Order {
             id
-            name
-            createdAt
-            displayFinancialStatus
-            displayFulfillmentStatus
-            totalPriceSet { shopMoney { amount currencyCode } }
-
-            # ➕  Explicitly fetch shipping-address company / location
-            shippingAddress {
-              company
-              provinceCode   # e.g. NSW
-              zip            # postcode
-            }
-
-            # Keep pulling up to 20 "custom" metafields
             metafields(first: 20, namespace: "custom") {
               edges { node { key value type } }
             }
           }
         }
-        pageInfo {
-          hasNextPage
-          hasPreviousPage
-          endCursor
-          startCursor
-        }
       }
-    }
-  `;
-  const variables = { first, after: afterCursor };
-
-  try {
-    const { data } = await axios.post(
+    `;
+    const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query, variables },
+      { query: gql, variables: { ids: gids } },
       {
         headers: {
           "Content-Type": "application/json",
@@ -96,48 +82,52 @@ app.get("/orders", async (req, res) => {
       }
     );
 
-    if (data.errors) {
-      console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
-      return res.status(502).json({ errors: data.errors });
-    }
+    /* Map metafields → { gid: { key: value } } */
+    const metaMap = {};
+    gqlRes.data.data.nodes.forEach(n => {
+      const mfs = {};
+      n.metafields.edges.forEach(e => { mfs[e.node.key] = e.node.value; });
+      metaMap[n.id] = mfs;
+    });
 
-    const shopifyOrders = data.data.orders;
-    const orders = shopifyOrders.edges.map(({ cursor, node }) => {
-      /* ---- flatten custom metafields into { key: value } ------ */
-      const metafields = {};
-      node.metafields.edges.forEach(mf => { metafields[mf.node.key] = mf.node.value; });
-
+    /* --- 3️⃣  Merge and flatten -------------------------------- */
+    const orders = restOrders.map(o => {
+      const gid  = `gid://shopify/Order/${o.id}`;
+      const ship = o.shipping_address || {};
       return {
-        cursor,
-        id                   : node.id,
-        name                 : node.name,
-        created_at           : node.createdAt,
-        financial_status     : node.displayFinancialStatus,
-        fulfillment_status   : node.displayFulfillmentStatus,
-        total_price          : node.totalPriceSet.shopMoney.amount,
-        currency             : node.totalPriceSet.shopMoney.currencyCode,
-        metafields,
-        /* ------ NEW fields surfaced to the FE ------------------- */
-        shipping_company     : node.shippingAddress?.company      || "",
-        shipping_state       : node.shippingAddress?.provinceCode || "",
-        shipping_postcode    : node.shippingAddress?.zip          || ""
+        id                 : gid,
+        name               : o.name,
+        created_at         : o.created_at,
+        financial_status   : o.financial_status,
+        fulfillment_status : o.fulfillment_status,
+        total_price        : o.total_price,
+        currency           : o.currency,
+        metafields         : metaMap[gid] || {},
+        /* Address bits pulled via REST (allowed) */
+        shipping_company   : ship.company        || "",
+        shipping_state     : ship.province_code  || "",
+        shipping_postcode  : ship.zip            || ""
       };
     });
 
+    /* --- 4️⃣  next since_id for FE paging ---------------------- */
+    const nextSinceId = orders.length
+      ? orders[orders.length - 1].id.split("/").pop()
+      : null;
+
     res.json({
       orders,
-      count      : orders.length,
-      next_cursor: shopifyOrders.pageInfo.hasNextPage      ? shopifyOrders.pageInfo.endCursor   : null,
-      prev_cursor: shopifyOrders.pageInfo.hasPreviousPage ? shopifyOrders.pageInfo.startCursor : null
+      count       : orders.length,
+      next_cursor : nextSinceId         // FE: ?since_id=next_cursor
     });
 
   } catch (err) {
-    console.error("🔴  Shopify GraphQL error (network/axios):", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch orders via GraphQL" });
+    console.error("🔴  Proxy error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
   }
 });
 
 /* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
-  console.log(`✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
+  console.log(`✅  Proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
