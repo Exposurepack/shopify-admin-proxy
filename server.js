@@ -59,7 +59,15 @@ app.get("/orders", async (req, res) => {
             displayFinancialStatus
             displayFulfillmentStatus
             totalPriceSet { shopMoney { amount currencyCode } }
-            metafields(first: 20, namespace: \"custom\") {
+
+            /*  ➕ NEW: pull company name + state + postcode  */
+            shippingAddress {
+              company
+              provinceCode
+              zip
+            }
+
+            metafields(first: 20, namespace: "custom") {
               edges { node { key value type } }
             }
           }
@@ -96,6 +104,7 @@ app.get("/orders", async (req, res) => {
 
     const shopifyOrders = data.data.orders;
     const orders = shopifyOrders.edges.map(({ cursor, node }) => {
+      /* ---- flatten custom metafields into { key: value } ------ */
       const metafields = {};
       node.metafields.edges.forEach(mf => { metafields[mf.node.key] = mf.node.value; });
 
@@ -108,7 +117,12 @@ app.get("/orders", async (req, res) => {
         fulfillment_status: node.displayFulfillmentStatus,
         total_price: node.totalPriceSet.shopMoney.amount,
         currency   : node.totalPriceSet.shopMoney.currencyCode,
-        metafields
+        metafields,
+
+        /* ➕ NEW fields returned to the FE */
+        shipping_company : node.shippingAddress?.company        || "",
+        shipping_state   : node.shippingAddress?.provinceCode   || "",
+        shipping_postcode: node.shippingAddress?.zip            || ""
       };
     });
 
