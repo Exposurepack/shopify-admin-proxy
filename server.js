@@ -39,27 +39,42 @@ app.get("/health", (_, res) => res.send("OK ✅"));
 
 /* ---------- /orders (HYBRID) ------------------------------------ */
 app.get("/orders", async (req, res) => {
-  /* REST paging – use since_id like a cursor */
-  const sinceId = req.query.since_id || 0;    // FE will pass ?since_id=123…
+  const sinceId = req.query.since_id || null;      // FE: ?since_id=123…
 
-  /* --- 1️⃣  REST: order stub + shipping address ---------------- */
+  /* -------- 1️⃣  REST fetch (address / order stub) ------------- */
+  const params = new URLSearchParams({
+    limit : 50,
+    status: "any",
+    fields: [
+      "id",
+      "name",
+      "created_at",
+      "financial_status",
+      "fulfillment_status",
+      "total_price",
+      "currency",
+      "shipping_address"
+    ].join(",")
+  });
+
+  if (sinceId) {
+    params.append("since_id", sinceId);            // paging cursor
+  } else {
+    params.append("order", "created_at desc");     // first page: newest first
+  }
+
   const restURL = `https://${SHOPIFY_STORE_URL}` +
-    `/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
-    `?limit=50&since_id=${sinceId}&status=any&order=created_at%20desc` +
-    `&fields=id,name,created_at,financial_status,fulfillment_status,` +
-    `total_price,currency,shipping_address`;
+    `/admin/api/${SHOPIFY_API_VERSION}/orders.json?${params.toString()}`;
 
   try {
-    const restRes = await axios.get(restURL, {
+    const restRes    = await axios.get(restURL, {
       headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
     });
     const restOrders = restRes.data.orders;
 
-    /* Collect GIDs for GraphQL */
+    /* -------- 2️⃣  GraphQL metafields (custom namespace) ------- */
     const gids = restOrders.map(o => `"gid://shopify/Order/${o.id}"`);
-
-    /* --- 2️⃣  GraphQL: only custom metafields ------------------ */
-    const gql = `
+    const gql  = `
       query meta($ids: [ID!]!) {
         nodes(ids: $ids) {
           ... on Order {
@@ -71,6 +86,7 @@ app.get("/orders", async (req, res) => {
         }
       }
     `;
+
     const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       { query: gql, variables: { ids: gids } },
@@ -82,7 +98,7 @@ app.get("/orders", async (req, res) => {
       }
     );
 
-    /* Map metafields → { gid: { key: value } } */
+    /* ---- flatten metafields → { gid: { key: value } } -------- */
     const metaMap = {};
     gqlRes.data.data.nodes.forEach(n => {
       const mfs = {};
@@ -90,9 +106,9 @@ app.get("/orders", async (req, res) => {
       metaMap[n.id] = mfs;
     });
 
-    /* --- 3️⃣  Merge and flatten -------------------------------- */
+    /* -------- 3️⃣  Merge & shape response ---------------------- */
     const orders = restOrders.map(o => {
-      const gid  = `gid://shopify/Order/${o.id}`;
+      const gid = `gid://shopify/Order/${o.id}`;
       const ship = o.shipping_address || {};
       return {
         id                 : gid,
@@ -103,22 +119,21 @@ app.get("/orders", async (req, res) => {
         total_price        : o.total_price,
         currency           : o.currency,
         metafields         : metaMap[gid] || {},
-        /* Address bits pulled via REST (allowed) */
         shipping_company   : ship.company        || "",
         shipping_state     : ship.province_code  || "",
         shipping_postcode  : ship.zip            || ""
       };
     });
 
-    /* --- 4️⃣  next since_id for FE paging ---------------------- */
-    const nextSinceId = orders.length
+    /* cursor for next page = last order’s numeric ID */
+    const nextCursor = orders.length
       ? orders[orders.length - 1].id.split("/").pop()
       : null;
 
     res.json({
       orders,
-      count       : orders.length,
-      next_cursor : nextSinceId         // FE: ?since_id=next_cursor
+      count      : orders.length,
+      next_cursor: nextCursor                    // FE: ?since_id=next_cursor
     });
 
   } catch (err) {
