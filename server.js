@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
-   Shopify Order Proxy – HYBRID (REST for address, GraphQL for metafields)
+   Shopify Order Proxy – FINAL HYBRID (REST for address, GraphQL for metafields)
    ------------------------------------------------------------------ */
 
 import express from "express";
@@ -39,11 +39,11 @@ app.get("/health", (_, res) => res.send("OK ✅"));
 
 /* ---------- /orders (HYBRID) ------------------------------------ */
 app.get("/orders", async (req, res) => {
-  const sinceId = req.query.since_id || 0;
+  const sinceId = req.query.since_id || 0;    // FE will pass ?since_id=123…
 
   const restURL = `https://${SHOPIFY_STORE_URL}` +
     `/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
-    `?limit=50&since_id=${sinceId}&status=any&order=created_at desc` +
+    `?limit=50&since_id=${sinceId}&status=any` +
     `&fields=id,name,created_at,financial_status,fulfillment_status,` +
     `total_price,currency,shipping_address`;
 
@@ -53,48 +53,41 @@ app.get("/orders", async (req, res) => {
     });
     const restOrders = restRes.data.orders;
 
-    let metaMap = {};
+    const gids = restOrders.map(o => `\"gid://shopify/Order/${o.id}\"`);
 
-    if (restOrders.length > 0) {
-      const gids = restOrders.map(o => `"gid://shopify/Order/${o.id}"`);
-      const gql = `
-        query meta($ids: [ID!]!) {
-          nodes(ids: $ids) {
-            ... on Order {
-              id
-              metafields(first: 20, namespace: "custom") {
-                edges { node { key value type } }
-              }
+    const gql = `
+      query meta($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on Order {
+            id
+            metafields(first: 20, namespace: \"custom\") {
+              edges { node { key value type } }
             }
           }
         }
-      `;
-
-      try {
-        const gqlRes = await axios.post(
-          `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-          { query: gql, variables: { ids: gids } },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
-            }
-          }
-        );
-
-        if (gqlRes.data?.data?.nodes) {
-          gqlRes.data.data.nodes.forEach(n => {
-            const mfs = {};
-            n.metafields?.edges.forEach(e => { mfs[e.node.key] = e.node.value; });
-            metaMap[n.id] = mfs;
-          });
-        } else {
-          console.warn("⚠️  No nodes returned from GraphQL metafield query");
-        }
-      } catch (gqlErr) {
-        console.error("🔴  GraphQL metafield fetch failed:", gqlErr.response?.data || gqlErr.message);
       }
-    }
+    `;
+
+    const gqlRes = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query: gql, variables: { ids: gids } },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    const nodes = gqlRes.data?.data?.nodes || [];
+    const metaMap = {};
+    nodes.forEach(n => {
+      const mfs = {};
+      n?.metafields?.edges?.forEach(e => {
+        mfs[e.node.key] = e.node.value;
+      });
+      metaMap[n.id] = mfs;
+    });
 
     const orders = restOrders.map(o => {
       const gid  = `gid://shopify/Order/${o.id}`;
@@ -130,7 +123,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-/* ---------- Start Server ---------------------------------------- */
+/* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
   console.log(`✅  Proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
