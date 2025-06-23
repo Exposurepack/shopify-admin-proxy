@@ -3,22 +3,22 @@
    ------------------------------------------------------------------
    ▸ Loads creds from env (.env in dev, Service Vars in prod)
    ▸ Simple x-api-key header check
-   ▸ /health    – uptime ping
-   ▸ /orders    – newest 50 orders  (?cursor=xxxx for next page)
+   ▸ /health  – uptime ping
+   ▸ /orders  – newest 50 orders  (?cursor=xxxx for next page)
    ------------------------------------------------------------------ */
 
-import express  from "express";
-import axios    from "axios";
-import cors     from "cors";
-import dotenv   from "dotenv";
+import express from "express";
+import axios   from "axios";
+import cors    from "cors";
+import dotenv  from "dotenv";
 dotenv.config();
 
 /* ---------- ENV -------------------------------------------------- */
 const {
-  SHOPIFY_STORE_URL,        // e.g. mystore.myshopify.com (NO https://)
-  SHOPIFY_ACCESS_TOKEN,     // Admin API token
+  SHOPIFY_STORE_URL,        // mystore.myshopify.com  (NO https://)
+  SHOPIFY_ACCESS_TOKEN,     // Admin-API token
   SHOPIFY_API_VERSION = "2024-04",
-  FRONTEND_SECRET,          // value your FE sends in x-api-key
+  FRONTEND_SECRET,          // value FE sends in x-api-key
   PORT = 10000
 } = process.env;
 
@@ -47,7 +47,7 @@ app.get("/orders", async (req, res) => {
   const afterCursor = req.query.cursor || null;   // ?cursor=xxxx
   const first       = 50;                         // Shopify max 250
 
-  const query = `
+  const query = /* GraphQL */ `
     query getOrders($first: Int!, $after: String) {
       orders(first: $first, after: $after, reverse: true) {
         edges {
@@ -60,13 +60,14 @@ app.get("/orders", async (req, res) => {
             displayFulfillmentStatus
             totalPriceSet { shopMoney { amount currencyCode } }
 
-            /*  ➕ NEW: pull company name + state + postcode  */
+            # ➕  Explicitly fetch shipping-address company / location
             shippingAddress {
               company
-              provinceCode
-              zip
+              provinceCode   # e.g. NSW
+              zip            # postcode
             }
 
+            # Keep pulling up to 20 "custom" metafields
             metafields(first: 20, namespace: "custom") {
               edges { node { key value type } }
             }
@@ -81,7 +82,6 @@ app.get("/orders", async (req, res) => {
       }
     }
   `;
-
   const variables = { first, after: afterCursor };
 
   try {
@@ -90,13 +90,12 @@ app.get("/orders", async (req, res) => {
       { query, variables },
       {
         headers: {
-          "Content-Type"          : "application/json",
+          "Content-Type": "application/json",
           "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
         }
       }
     );
 
-    /* ----- GraphQL-level errors -------------------------------- */
     if (data.errors) {
       console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
       return res.status(502).json({ errors: data.errors });
@@ -110,19 +109,18 @@ app.get("/orders", async (req, res) => {
 
       return {
         cursor,
-        id        : node.id,
-        name      : node.name,
-        created_at: node.createdAt,
-        financial_status  : node.displayFinancialStatus,
-        fulfillment_status: node.displayFulfillmentStatus,
-        total_price: node.totalPriceSet.shopMoney.amount,
-        currency   : node.totalPriceSet.shopMoney.currencyCode,
+        id                   : node.id,
+        name                 : node.name,
+        created_at           : node.createdAt,
+        financial_status     : node.displayFinancialStatus,
+        fulfillment_status   : node.displayFulfillmentStatus,
+        total_price          : node.totalPriceSet.shopMoney.amount,
+        currency             : node.totalPriceSet.shopMoney.currencyCode,
         metafields,
-
-        /* ➕ NEW fields returned to the FE */
-        shipping_company : node.shippingAddress?.company        || "",
-        shipping_state   : node.shippingAddress?.provinceCode   || "",
-        shipping_postcode: node.shippingAddress?.zip            || ""
+        /* ------ NEW fields surfaced to the FE ------------------- */
+        shipping_company     : node.shippingAddress?.company      || "",
+        shipping_state       : node.shippingAddress?.provinceCode || "",
+        shipping_postcode    : node.shippingAddress?.zip          || ""
       };
     });
 
