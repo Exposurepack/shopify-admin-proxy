@@ -39,76 +39,65 @@ app.get("/health", (_, res) => res.send("OK ✅"));
 
 /* ---------- /orders (HYBRID) ------------------------------------ */
 app.get("/orders", async (req, res) => {
-  const sinceId = req.query.since_id || null;      // FE: ?since_id=123…
-
-  /* -------- 1️⃣  REST fetch (address / order stub) ------------- */
-  const params = new URLSearchParams({
-    limit : 50,
-    status: "any",
-    fields: [
-      "id",
-      "name",
-      "created_at",
-      "financial_status",
-      "fulfillment_status",
-      "total_price",
-      "currency",
-      "shipping_address"
-    ].join(",")
-  });
-
-  if (sinceId) {
-    params.append("since_id", sinceId);            // paging cursor
-  } else {
-    params.append("order", "created_at desc");     // first page: newest first
-  }
+  const sinceId = req.query.since_id || 0;
 
   const restURL = `https://${SHOPIFY_STORE_URL}` +
-    `/admin/api/${SHOPIFY_API_VERSION}/orders.json?${params.toString()}`;
+    `/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
+    `?limit=50&since_id=${sinceId}&status=any&order=created_at desc` +
+    `&fields=id,name,created_at,financial_status,fulfillment_status,` +
+    `total_price,currency,shipping_address`;
 
   try {
-    const restRes    = await axios.get(restURL, {
+    const restRes = await axios.get(restURL, {
       headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
     });
     const restOrders = restRes.data.orders;
 
-    /* -------- 2️⃣  GraphQL metafields (custom namespace) ------- */
-    const gids = restOrders.map(o => `"gid://shopify/Order/${o.id}"`);
-    const gql  = `
-      query meta($ids: [ID!]!) {
-        nodes(ids: $ids) {
-          ... on Order {
-            id
-            metafields(first: 20, namespace: "custom") {
-              edges { node { key value type } }
+    let metaMap = {};
+
+    if (restOrders.length > 0) {
+      const gids = restOrders.map(o => `"gid://shopify/Order/${o.id}"`);
+      const gql = `
+        query meta($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Order {
+              id
+              metafields(first: 20, namespace: "custom") {
+                edges { node { key value type } }
+              }
             }
           }
         }
-      }
-    `;
+      `;
 
-    const gqlRes = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: gql, variables: { ids: gids } },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+      try {
+        const gqlRes = await axios.post(
+          `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+          { query: gql, variables: { ids: gids } },
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+            }
+          }
+        );
+
+        if (gqlRes.data?.data?.nodes) {
+          gqlRes.data.data.nodes.forEach(n => {
+            const mfs = {};
+            n.metafields?.edges.forEach(e => { mfs[e.node.key] = e.node.value; });
+            metaMap[n.id] = mfs;
+          });
+        } else {
+          console.warn("⚠️  No nodes returned from GraphQL metafield query");
         }
+      } catch (gqlErr) {
+        console.error("🔴  GraphQL metafield fetch failed:", gqlErr.response?.data || gqlErr.message);
       }
-    );
+    }
 
-    /* ---- flatten metafields → { gid: { key: value } } -------- */
-    const metaMap = {};
-    gqlRes.data.data.nodes.forEach(n => {
-      const mfs = {};
-      n.metafields.edges.forEach(e => { mfs[e.node.key] = e.node.value; });
-      metaMap[n.id] = mfs;
-    });
-
-    /* -------- 3️⃣  Merge & shape response ---------------------- */
     const orders = restOrders.map(o => {
-      const gid = `gid://shopify/Order/${o.id}`;
+      const gid  = `gid://shopify/Order/${o.id}`;
       const ship = o.shipping_address || {};
       return {
         id                 : gid,
@@ -125,15 +114,14 @@ app.get("/orders", async (req, res) => {
       };
     });
 
-    /* cursor for next page = last order’s numeric ID */
-    const nextCursor = orders.length
+    const nextSinceId = orders.length
       ? orders[orders.length - 1].id.split("/").pop()
       : null;
 
     res.json({
       orders,
-      count      : orders.length,
-      next_cursor: nextCursor                    // FE: ?since_id=next_cursor
+      count       : orders.length,
+      next_cursor : nextSinceId
     });
 
   } catch (err) {
@@ -142,7 +130,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-/* ---------- Start Server --------------------------------------- */
+/* ---------- Start Server ---------------------------------------- */
 app.listen(PORT, () => {
   console.log(`✅  Proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
