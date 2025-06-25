@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 dotenv.config();
 
+/* ---------- ENV CONFIG ----------------------------------------- */
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
@@ -17,10 +18,12 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   process.exit(1);
 }
 
+/* ---------- INIT APP ------------------------------------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ---------- AUTH MIDDLEWARE ------------------------------------ */
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
     return res.status(403).send("Forbidden – Invalid API key");
@@ -28,12 +31,15 @@ app.use((req, res, next) => {
   next();
 });
 
+/* ---------- HEALTH CHECK --------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
+/* ---------- METAFIELDS GET (TESTING ONLY) ---------------------- */
 app.get("/metafields", (_, res) => {
   res.status(200).send("Metafields endpoint ready. Use POST to write data.");
 });
 
+/* ---------- METAFIELDS POST (WRITE) ---------------------------- */
 app.post("/metafields", async (req, res) => {
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
@@ -90,12 +96,12 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
-app.get("/orders/:legacyId", async (req, res) => {
-  const { legacyId } = req.params;
-
+/* ---------- ORDERS GET (REST + GRAPHQL) ------------------------ */
+app.get("/orders", async (req, res) => {
   try {
+    // 1. Get note_attributes via REST
     const restRes = await axios.get(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyId}.json`,
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=50&status=any`,
       {
         headers: {
           "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -104,58 +110,73 @@ app.get("/orders/:legacyId", async (req, res) => {
     );
 
     const noteMap = {};
-    restRes.data.order.note_attributes.forEach((na) => {
-      noteMap[na.name] = na.value;
+    restRes.data.orders.forEach((order) => {
+      const notes = {};
+      order.note_attributes.forEach((na) => {
+        notes[na.name] = na.value;
+      });
+      noteMap[order.id] = notes;
     });
 
+    // 2. Get other order details via GraphQL
     const gqlQuery = `
-      query GetOrder($id: ID!) {
-        order(id: $id) {
-          id
-          legacyResourceId
-          name
-          createdAt
-          displayFinancialStatus
-          displayFulfillmentStatus
-          totalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-          }
-          lineItems(first: 50) {
-            edges {
-              node {
-                title
-                quantity
-                sku
-                variantTitle
-                vendor
-                product {
-                  title
-                  productType
+      query GetOrders($first: Int!) {
+        orders(first: $first, reverse: true) {
+          edges {
+            cursor
+            node {
+              id
+              legacyResourceId
+              name
+              createdAt
+              displayFinancialStatus
+              displayFulfillmentStatus
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    title
+                    quantity
+                    sku
+                    variantTitle
+                    vendor
+                    product {
+                      title
+                      productType
+                    }
+                  }
+                }
+              }
+              metafields(first: 20, namespace: "custom") {
+                edges {
+                  node {
+                    key
+                    value
+                    type
+                  }
                 }
               }
             }
           }
-          metafields(first: 20, namespace: "custom") {
-            edges {
-              node {
-                key
-                value
-                type
-              }
-            }
+          pageInfo {
+            hasNextPage
+            endCursor
           }
         }
       }
     `;
 
-    const gid = `gid://shopify/Order/${legacyId}`;
-
     const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: gqlQuery, variables: { id: gid } },
+      {
+        query: gqlQuery,
+        variables: { first: 50 },
+      },
       {
         headers: {
           "Content-Type": "application/json",
@@ -165,45 +186,56 @@ app.get("/orders/:legacyId", async (req, res) => {
     );
 
     if (gqlRes.data.errors) {
-      console.error("🔴 GraphQL Error:", gqlRes.data.errors);
+      console.error("🔴 GraphQL Errors:", gqlRes.data.errors);
       return res.status(502).json({ errors: gqlRes.data.errors });
     }
 
-    const node = gqlRes.data.data.order;
-    const metafields = {};
-    node.metafields.edges.forEach((mf) => {
-      metafields[mf.node.key] = mf.node.value;
-    });
+    const orders = gqlRes.data.data.orders.edges.map(({ cursor, node }) => {
+      const metafields = {};
+      node.metafields.edges.forEach((mf) => {
+        metafields[mf.node.key] = mf.node.value;
+      });
 
-    const lineItems = node.lineItems.edges.map((item) => ({
-      title: item.node.title,
-      quantity: item.node.quantity,
-      sku: item.node.sku,
-      variantTitle: item.node.variantTitle,
-      vendor: item.node.vendor,
-      productTitle: item.node.product?.title,
-      productType: item.node.product?.productType,
-    }));
+      const lineItems = node.lineItems.edges.map((item) => ({
+        title: item.node.title,
+        quantity: item.node.quantity,
+        sku: item.node.sku,
+        variantTitle: item.node.variantTitle,
+        vendor: item.node.vendor,
+        productTitle: item.node.product?.title,
+        productType: item.node.product?.productType,
+      }));
+
+      return {
+        cursor,
+        id: node.id,
+        legacy_id: node.legacyResourceId,
+        name: node.name,
+        created_at: node.createdAt,
+        financial_status: node.displayFinancialStatus,
+        fulfillment_status: node.displayFulfillmentStatus,
+        total_price: node.totalPriceSet.shopMoney.amount,
+        currency: node.totalPriceSet.shopMoney.currencyCode,
+        metafields,
+        attributes: noteMap[node.legacyResourceId] || {},
+        line_items: lineItems,
+      };
+    });
 
     res.json({
-      id: node.id,
-      legacy_id: node.legacyResourceId,
-      name: node.name,
-      created_at: node.createdAt,
-      financial_status: node.displayFinancialStatus,
-      fulfillment_status: node.displayFulfillmentStatus,
-      total_price: node.totalPriceSet.shopMoney.amount,
-      currency: node.totalPriceSet.shopMoney.currencyCode,
-      metafields,
-      attributes: noteMap,
-      line_items: lineItems,
+      orders,
+      count: orders.length,
+      next_cursor: gqlRes.data.data.orders.pageInfo.hasNextPage
+        ? gqlRes.data.data.orders.pageInfo.endCursor
+        : null,
     });
   } catch (err) {
-    console.error("🔴 /orders/:id error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch individual order" });
+    console.error("🔴 Order fetch error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
   }
 });
 
+/* ---------- START SERVER --------------------------------------- */
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
 });
