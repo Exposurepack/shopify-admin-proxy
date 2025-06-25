@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 dotenv.config();
 
+/* ---------- ENV CONFIG ----------------------------------------- */
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
@@ -13,26 +14,92 @@ const {
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error("❌  Missing env vars – set SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
+  console.error("❌ Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
   process.exit(1);
 }
 
+/* ---------- INIT APP ------------------------------------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ---------- AUTH MIDDLEWARE ------------------------------------ */
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
-    return res.status(403).send("Forbidden – bad API key");
+    return res.status(403).send("Forbidden – Invalid API key");
   }
   next();
 });
 
+/* ---------- HEALTH CHECK --------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
-// Fetch latest orders with line items, metafields, and note attributes
+/* ---------- METAFIELDS GET (TESTING ONLY) ---------------------- */
+app.get("/metafields", (_, res) => {
+  res.status(200).send("Metafields endpoint ready. Use POST to write data.");
+});
+
+/* ---------- METAFIELDS POST (WRITE) ---------------------------- */
+app.post("/metafields", async (req, res) => {
+  const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
+
+  if (!orderGID || !key || typeof value === "undefined") {
+    return res.status(400).json({ error: "Missing required fields: orderGID, key, value" });
+  }
+
+  const mutation = `
+    mutation SetMetafields($input: MetafieldsSetInput!) {
+      metafieldsSet(metafields: [$input]) {
+        metafields {
+          key
+          value
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      ownerId: orderGID,
+      namespace,
+      key,
+      type,
+      value: String(value),
+    },
+  };
+
+  try {
+    const { data } = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query: mutation, variables },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
+      console.error("🔴 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
+      return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
+    }
+
+    res.json({ success: true, metafields: data.data.metafieldsSet.metafields });
+  } catch (err) {
+    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to write metafield" });
+  }
+});
+
+/* ---------- ORDERS GET (REST + GRAPHQL) ------------------------ */
 app.get("/orders", async (req, res) => {
   try {
+    // 1. Get note_attributes via REST
     const restRes = await axios.get(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=50&status=any`,
       {
@@ -51,15 +118,16 @@ app.get("/orders", async (req, res) => {
       noteMap[order.id] = notes;
     });
 
+    // 2. Get other order details via GraphQL
     const gqlQuery = `
-      query getOrders($first: Int!) {
+      query GetOrders($first: Int!) {
         orders(first: $first, reverse: true) {
           edges {
             cursor
             node {
               id
-              name
               legacyResourceId
+              name
               createdAt
               displayFinancialStatus
               displayFulfillmentStatus
@@ -105,7 +173,10 @@ app.get("/orders", async (req, res) => {
 
     const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: gqlQuery, variables: { first: 50 } },
+      {
+        query: gqlQuery,
+        variables: { first: 50 },
+      },
       {
         headers: {
           "Content-Type": "application/json",
@@ -127,8 +198,8 @@ app.get("/orders", async (req, res) => {
 
       const lineItems = node.lineItems.edges.map((item) => ({
         title: item.node.title,
-        sku: item.node.sku,
         quantity: item.node.quantity,
+        sku: item.node.sku,
         variantTitle: item.node.variantTitle,
         vendor: item.node.vendor,
         productTitle: item.node.product?.title,
@@ -164,108 +235,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// Fetch metafields by order GID
-app.get("/metafields/:orderGID", async (req, res) => {
-  const { orderGID } = req.params;
-
-  const query = `
-    query GetMetafields($ownerId: ID!) {
-      metafields(owner: $ownerId, first: 50, namespace: "custom") {
-        edges {
-          node {
-            key
-            value
-            type
-            namespace
-            id
-          }
-        }
-      }
-    }
-  `;
-
-  try {
-    const { data } = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query, variables: { ownerId: orderGID } },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        },
-      }
-    );
-
-    if (data.errors) {
-      console.error("🔴 Metafield fetch error:", data.errors);
-      return res.status(502).json({ errors: data.errors });
-    }
-
-    const metafields = data.data.metafields.edges.map((edge) => edge.node);
-    res.json({ metafields });
-  } catch (err) {
-    console.error("🔴 Metafield GET error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch metafields" });
-  }
-});
-
-// Write/update metafield
-app.post("/metafields", async (req, res) => {
-  const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
-
-  if (!orderGID || !key || typeof value === "undefined") {
-    return res.status(400).json({ error: "Missing required fields: orderGID, key, value" });
-  }
-
-  const mutation = `
-    mutation CreateMetafield($input: MetafieldsSetInput!) {
-      metafieldsSet(metafields: [$input]) {
-        metafields {
-          key
-          value
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    input: {
-      ownerId: orderGID,
-      namespace,
-      key,
-      type,
-      value: String(value),
-    },
-  };
-
-  try {
-    const { data } = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: mutation, variables },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        },
-      }
-    );
-
-    if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("🔴 Metafield write errors:", data.errors || data.data.metafieldsSet.userErrors);
-      return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
-    }
-
-    res.json({ success: true, written: data.data.metafieldsSet.metafields });
-  } catch (err) {
-    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to write metafield" });
-  }
-});
-
+/* ---------- START SERVER --------------------------------------- */
 app.listen(PORT, () => {
-  console.log(`✅  GraphQL + REST proxy running on http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
+  console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
 });
