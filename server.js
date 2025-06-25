@@ -4,7 +4,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 dotenv.config();
 
-/* ---------- ENV CONFIG ----------------------------------------- */
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
@@ -18,12 +17,10 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   process.exit(1);
 }
 
-/* ---------- INIT APP ------------------------------------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ---------- AUTH MIDDLEWARE ------------------------------------ */
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
     return res.status(403).send("Forbidden – Invalid API key");
@@ -31,15 +28,12 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- HEALTH CHECK --------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
-/* ---------- METAFIELDS GET (TESTING ONLY) ---------------------- */
 app.get("/metafields", (_, res) => {
   res.status(200).send("Metafields endpoint ready. Use POST to write data.");
 });
 
-/* ---------- METAFIELDS POST (WRITE) ---------------------------- */
 app.post("/metafields", async (req, res) => {
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
@@ -96,7 +90,6 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
-/* ---------- INDIVIDUAL ORDER BY LEGACY ID ---------------------- */
 app.get("/orders/:legacyId", async (req, res) => {
   const { legacyId } = req.params;
 
@@ -211,7 +204,6 @@ app.get("/orders/:legacyId", async (req, res) => {
   }
 });
 
-/* ---------- START SERVER --------------------------------------- */
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
 });
