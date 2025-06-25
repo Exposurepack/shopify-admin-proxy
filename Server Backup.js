@@ -47,7 +47,7 @@ app.get("/orders", async (req, res) => {
   const afterCursor = req.query.cursor || null;   // ?cursor=xxxx
   const first       = 50;                         // Shopify max 250
 
-  const query = 
+  const query = `
     query getOrders($first: Int!, $after: String) {
       orders(first: $first, after: $after, reverse: true) {
         edges {
@@ -59,7 +59,7 @@ app.get("/orders", async (req, res) => {
             displayFinancialStatus
             displayFulfillmentStatus
             totalPriceSet { shopMoney { amount currencyCode } }
-            metafields(first: 20, namespace: \"custom\") {
+            metafields(first: 20, namespace: "custom") {
               edges { node { key value type } }
             }
           }
@@ -72,13 +72,13 @@ app.get("/orders", async (req, res) => {
         }
       }
     }
-  ;
+  `;
 
   const variables = { first, after: afterCursor };
 
   try {
     const { data } = await axios.post(
-      https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json,
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       { query, variables },
       {
         headers: {
@@ -88,7 +88,6 @@ app.get("/orders", async (req, res) => {
       }
     );
 
-    /* ----- GraphQL-level errors -------------------------------- */
     if (data.errors) {
       console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
       return res.status(502).json({ errors: data.errors });
@@ -127,5 +126,5 @@ app.get("/orders", async (req, res) => {
 
 /* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
-  console.log(✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL});
+  console.log(`✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
