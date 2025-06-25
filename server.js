@@ -1,44 +1,9 @@
-import express from "express";
-import axios from "axios";
-import cors from "cors";
-import dotenv from "dotenv";
-dotenv.config();
-
-/* ---------- ENV -------------------------------------------------- */
-const {
-  SHOPIFY_STORE_URL,
-  SHOPIFY_ACCESS_TOKEN,
-  SHOPIFY_API_VERSION = "2024-04",
-  FRONTEND_SECRET,
-  PORT = 10000,
-} = process.env;
-
-if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error("❌  Missing env vars – set SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
-  process.exit(1);
-}
-
-/* ---------- APP -------------------------------------------------- */
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-/* ---------- Tiny Auth ------------------------------------------- */
-app.use((req, res, next) => {
-  if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
-    return res.status(403).send("Forbidden – bad API key");
-  }
-  next();
-});
-
-/* ---------- Health Check ---------------------------------------- */
-app.get("/health", (_, res) => res.send("OK ✅"));
-
 /* ---------- /orders --------------------------------------------- */
 app.get("/orders", async (req, res) => {
-  const afterCursor = req.query.cursor || null;
   const first = 50;
+  const afterCursor = req.query.cursor || null;
 
+  // GraphQL query (excluding note/noteAttributes)
   const query = `
     query getOrders($first: Int!, $after: String) {
       orders(first: $first, after: $after, reverse: true) {
@@ -55,10 +20,6 @@ app.get("/orders", async (req, res) => {
                 amount
                 currencyCode
               }
-            }
-            noteAttributes {
-              name
-              value
             }
             metafields(first: 20, namespace: "custom") {
               edges {
@@ -84,7 +45,7 @@ app.get("/orders", async (req, res) => {
   const variables = { first, after: afterCursor };
 
   try {
-    const { data } = await axios.post(
+    const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       { query, variables },
       {
@@ -95,22 +56,38 @@ app.get("/orders", async (req, res) => {
       }
     );
 
-    if (data.errors) {
-      console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
-      return res.status(502).json({ errors: data.errors });
+    if (gqlRes.data.errors) {
+      console.error("🔴 GraphQL errors:", JSON.stringify(gqlRes.data.errors, null, 2));
+      return res.status(502).json({ errors: gqlRes.data.errors });
     }
 
-    const shopifyOrders = data.data.orders;
+    const shopifyOrders = gqlRes.data.data.orders;
+
+    // Fetch REST orders (for notes)
+    const restRes = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=${first}&status=any&order=created_at desc`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    const restOrders = restRes.data.orders;
+
     const orders = shopifyOrders.edges.map(({ cursor, node }) => {
       const metafields = {};
       node.metafields.edges.forEach((mf) => {
         metafields[mf.node.key] = mf.node.value;
       });
 
+      const restMatch = restOrders.find((r) => r.name === node.name);
       const attributes = {};
-      node.noteAttributes.forEach((attr) => {
-        attributes[attr.name] = attr.value;
-      });
+      if (restMatch?.note_attributes) {
+        restMatch.note_attributes.forEach((attr) => {
+          attributes[attr.name] = attr.value;
+        });
+      }
 
       return {
         cursor,
@@ -122,7 +99,8 @@ app.get("/orders", async (req, res) => {
         total_price: node.totalPriceSet.shopMoney.amount,
         currency: node.totalPriceSet.shopMoney.currencyCode,
         metafields,
-        attributes, // ✅ customer-entered values like business_name
+        attributes, // ✅ pulled from REST
+        note: restMatch?.note || "", // Optional note field from REST
       };
     });
 
@@ -133,69 +111,7 @@ app.get("/orders", async (req, res) => {
       prev_cursor: shopifyOrders.pageInfo.hasPreviousPage ? shopifyOrders.pageInfo.startCursor : null,
     });
   } catch (err) {
-    console.error("🔴  Shopify GraphQL error (network/axios):", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch orders via GraphQL" });
+    console.error("🔴 Order fetch failed:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
   }
-});
-
-/* ---------- /metafields (write) --------------------------------- */
-app.post("/metafields", async (req, res) => {
-  const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
-
-  if (!orderGID || !key || typeof value === "undefined") {
-    return res.status(400).json({ error: "Missing required fields: orderGID, key, value" });
-  }
-
-  const mutation = `
-    mutation CreateMetafield($input: MetafieldsSetInput!) {
-      metafieldsSet(metafields: [$input]) {
-        metafields {
-          key
-          value
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    input: {
-      ownerId: orderGID,
-      namespace,
-      key,
-      type,
-      value: String(value),
-    },
-  };
-
-  try {
-    const { data } = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: mutation, variables },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        },
-      }
-    );
-
-    if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("🔴 Metafield write errors:", data.errors || data.data.metafieldsSet.userErrors);
-      return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
-    }
-
-    res.json({ success: true, written: data.data.metafieldsSet.metafields });
-  } catch (err) {
-    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to write metafield" });
-  }
-});
-
-/* ---------- Start Server --------------------------------------- */
-app.listen(PORT, () => {
-  console.log(`✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
 });
