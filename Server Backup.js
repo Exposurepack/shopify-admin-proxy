@@ -4,7 +4,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 dotenv.config();
 
-/* ---------- ENV -------------------------------------------------- */
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
@@ -18,12 +17,10 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   process.exit(1);
 }
 
-/* ---------- APP -------------------------------------------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ---------- Tiny Auth ------------------------------------------- */
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
     return res.status(403).send("Forbidden – bad API key");
@@ -31,13 +28,10 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- Health Check ---------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
-/* ---------- /orders (REST for notes + GraphQL for rest) --------- */
 app.get("/orders", async (req, res) => {
   try {
-    // REST API to get order note attributes
     const restRes = await axios.get(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=50&status=any`,
       {
@@ -56,7 +50,6 @@ app.get("/orders", async (req, res) => {
       noteMap[order.id] = notes;
     });
 
-    // GraphQL query to get the rest of the order data
     const gqlQuery = `
       query getOrders($first: Int!) {
         orders(first: $first, reverse: true) {
@@ -73,6 +66,21 @@ app.get("/orders", async (req, res) => {
                 shopMoney {
                   amount
                   currencyCode
+                }
+              }
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    title
+                    quantity
+                    sku
+                    variantTitle
+                    vendor
+                    product {
+                      title
+                      productType
+                    }
+                  }
                 }
               }
               metafields(first: 20, namespace: "custom") {
@@ -94,11 +102,9 @@ app.get("/orders", async (req, res) => {
       }
     `;
 
-    const variables = { first: 50 };
-
     const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: gqlQuery, variables },
+      { query: gqlQuery, variables: { first: 50 } },
       {
         headers: {
           "Content-Type": "application/json",
@@ -118,13 +124,20 @@ app.get("/orders", async (req, res) => {
         metafields[mf.node.key] = mf.node.value;
       });
 
-      const legacyId = node.legacyResourceId;
-      const noteAttributes = noteMap[legacyId] || {};
+      const lineItems = node.lineItems.edges.map((item) => ({
+        title: item.node.title,
+        sku: item.node.sku,
+        quantity: item.node.quantity,
+        variantTitle: item.node.variantTitle,
+        vendor: item.node.vendor,
+        productTitle: item.node.product?.title,
+        productType: item.node.product?.productType,
+      }));
 
       return {
         cursor,
         id: node.id,
-        legacy_id: legacyId,
+        legacy_id: node.legacyResourceId,
         name: node.name,
         created_at: node.createdAt,
         financial_status: node.displayFinancialStatus,
@@ -132,7 +145,8 @@ app.get("/orders", async (req, res) => {
         total_price: node.totalPriceSet.shopMoney.amount,
         currency: node.totalPriceSet.shopMoney.currencyCode,
         metafields,
-        attributes: noteAttributes,
+        attributes: noteMap[node.legacyResourceId] || {},
+        line_items: lineItems,
       };
     });
 
@@ -149,7 +163,6 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-/* ---------- /metafields (write) --------------------------------- */
 app.post("/metafields", async (req, res) => {
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
@@ -206,7 +219,6 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
-/* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
   console.log(`✅  GraphQL + REST proxy running on http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
 });
