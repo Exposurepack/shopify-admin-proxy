@@ -1,25 +1,16 @@
-/* ------------------------------------------------------------------
-   Shopify Order Proxy – server.js  (GraphQL-only, PII-safe)
-   ------------------------------------------------------------------
-   ▸ Loads creds from env (.env in dev, Service Vars in prod)
-   ▸ Simple x-api-key header check
-   ▸ /health    – uptime ping
-   ▸ /orders    – newest 50 orders  (?cursor=xxxx for next page)
-   ------------------------------------------------------------------ */
-
-import express  from "express";
-import axios    from "axios";
-import cors     from "cors";
-import dotenv   from "dotenv";
+import express from "express";
+import axios from "axios";
+import cors from "cors";
+import dotenv from "dotenv";
 dotenv.config();
 
 /* ---------- ENV -------------------------------------------------- */
 const {
-  SHOPIFY_STORE_URL,        // e.g. mystore.myshopify.com (NO https://)
-  SHOPIFY_ACCESS_TOKEN,     // Admin API token
+  SHOPIFY_STORE_URL,
+  SHOPIFY_ACCESS_TOKEN,
   SHOPIFY_API_VERSION = "2024-04",
-  FRONTEND_SECRET,          // value your FE sends in x-api-key
-  PORT = 10000
+  FRONTEND_SECRET,
+  PORT = 10000,
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
@@ -30,8 +21,9 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
 /* ---------- APP -------------------------------------------------- */
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-/* ---------- Tiny auth ------------------------------------------- */
+/* ---------- Tiny Auth ------------------------------------------- */
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
     return res.status(403).send("Forbidden – bad API key");
@@ -42,89 +34,179 @@ app.use((req, res, next) => {
 /* ---------- Health Check ---------------------------------------- */
 app.get("/health", (_, res) => res.send("OK ✅"));
 
-/* ---------- /orders (GraphQL, cursor paging) -------------------- */
+/* ---------- /orders (REST for notes + GraphQL for rest) --------- */
 app.get("/orders", async (req, res) => {
-  const afterCursor = req.query.cursor || null;   // ?cursor=xxxx
-  const first       = 50;                         // Shopify max 250
-
-  const query = `
-    query getOrders($first: Int!, $after: String) {
-      orders(first: $first, after: $after, reverse: true) {
-        edges {
-          cursor
-          node {
-            id
-            name
-            createdAt
-            displayFinancialStatus
-            displayFulfillmentStatus
-            totalPriceSet { shopMoney { amount currencyCode } }
-            metafields(first: 20, namespace: "custom") {
-              edges { node { key value type } }
-            }
-          }
-        }
-        pageInfo {
-          hasNextPage
-          hasPreviousPage
-          endCursor
-          startCursor
-        }
-      }
-    }
-  `;
-
-  const variables = { first, after: afterCursor };
-
   try {
-    const { data } = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query, variables },
+    // REST API to get order note attributes
+    const restRes = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=50&status=any`,
       {
         headers: {
-          "Content-Type"          : "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
-        }
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
       }
     );
 
-    if (data.errors) {
-      console.error("🔴  Shopify GraphQL errors:", JSON.stringify(data.errors, null, 2));
-      return res.status(502).json({ errors: data.errors });
+    const noteMap = {};
+    restRes.data.orders.forEach((order) => {
+      const notes = {};
+      order.note_attributes.forEach((na) => {
+        notes[na.name] = na.value;
+      });
+      noteMap[order.id] = notes;
+    });
+
+    // GraphQL query to get the rest of the order data
+    const gqlQuery = `
+      query getOrders($first: Int!) {
+        orders(first: $first, reverse: true) {
+          edges {
+            cursor
+            node {
+              id
+              name
+              legacyResourceId
+              createdAt
+              displayFinancialStatus
+              displayFulfillmentStatus
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              metafields(first: 20, namespace: "custom") {
+                edges {
+                  node {
+                    key
+                    value
+                    type
+                  }
+                }
+              }
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    `;
+
+    const variables = { first: 50 };
+
+    const gqlRes = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query: gqlQuery, variables },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (gqlRes.data.errors) {
+      console.error("🔴 GraphQL Errors:", gqlRes.data.errors);
+      return res.status(502).json({ errors: gqlRes.data.errors });
     }
 
-    const shopifyOrders = data.data.orders;
-    const orders = shopifyOrders.edges.map(({ cursor, node }) => {
+    const orders = gqlRes.data.data.orders.edges.map(({ cursor, node }) => {
       const metafields = {};
-      node.metafields.edges.forEach(mf => { metafields[mf.node.key] = mf.node.value; });
+      node.metafields.edges.forEach((mf) => {
+        metafields[mf.node.key] = mf.node.value;
+      });
+
+      const legacyId = node.legacyResourceId;
+      const noteAttributes = noteMap[legacyId] || {};
 
       return {
         cursor,
-        id        : node.id,
-        name      : node.name,
+        id: node.id,
+        legacy_id: legacyId,
+        name: node.name,
         created_at: node.createdAt,
-        financial_status  : node.displayFinancialStatus,
+        financial_status: node.displayFinancialStatus,
         fulfillment_status: node.displayFulfillmentStatus,
         total_price: node.totalPriceSet.shopMoney.amount,
-        currency   : node.totalPriceSet.shopMoney.currencyCode,
-        metafields
+        currency: node.totalPriceSet.shopMoney.currencyCode,
+        metafields,
+        attributes: noteAttributes,
       };
     });
 
     res.json({
       orders,
-      count      : orders.length,
-      next_cursor: shopifyOrders.pageInfo.hasNextPage      ? shopifyOrders.pageInfo.endCursor   : null,
-      prev_cursor: shopifyOrders.pageInfo.hasPreviousPage ? shopifyOrders.pageInfo.startCursor : null
+      count: orders.length,
+      next_cursor: gqlRes.data.data.orders.pageInfo.hasNextPage
+        ? gqlRes.data.data.orders.pageInfo.endCursor
+        : null,
     });
-
   } catch (err) {
-    console.error("🔴  Shopify GraphQL error (network/axios):", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch orders via GraphQL" });
+    console.error("🔴 Order fetch error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+
+/* ---------- /metafields (write) --------------------------------- */
+app.post("/metafields", async (req, res) => {
+  const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
+
+  if (!orderGID || !key || typeof value === "undefined") {
+    return res.status(400).json({ error: "Missing required fields: orderGID, key, value" });
+  }
+
+  const mutation = `
+    mutation CreateMetafield($input: MetafieldsSetInput!) {
+      metafieldsSet(metafields: [$input]) {
+        metafields {
+          key
+          value
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      ownerId: orderGID,
+      namespace,
+      key,
+      type,
+      value: String(value),
+    },
+  };
+
+  try {
+    const { data } = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query: mutation, variables },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
+      console.error("🔴 Metafield write errors:", data.errors || data.data.metafieldsSet.userErrors);
+      return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
+    }
+
+    res.json({ success: true, written: data.data.metafieldsSet.metafields });
+  } catch (err) {
+    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to write metafield" });
   }
 });
 
 /* ---------- Start Server --------------------------------------- */
 app.listen(PORT, () => {
-  console.log(`✅  GraphQL proxy running on http://localhost:${PORT}  →  ${SHOPIFY_STORE_URL}`);
+  console.log(`✅  GraphQL + REST proxy running on http://localhost:${PORT} → ${SHOPIFY_STORE_URL}`);
 });
