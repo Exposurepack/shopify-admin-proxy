@@ -30,6 +30,7 @@ app.use((req, res, next) => {
 
 app.get("/health", (_, res) => res.send("OK ✅"));
 
+// Fetch latest orders with line items, metafields, and note attributes
 app.get("/orders", async (req, res) => {
   try {
     const restRes = await axios.get(
@@ -163,6 +164,52 @@ app.get("/orders", async (req, res) => {
   }
 });
 
+// Fetch metafields by order GID
+app.get("/metafields/:orderGID", async (req, res) => {
+  const { orderGID } = req.params;
+
+  const query = `
+    query GetMetafields($ownerId: ID!) {
+      metafields(owner: $ownerId, first: 50, namespace: "custom") {
+        edges {
+          node {
+            key
+            value
+            type
+            namespace
+            id
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const { data } = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query, variables: { ownerId: orderGID } },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (data.errors) {
+      console.error("🔴 Metafield fetch error:", data.errors);
+      return res.status(502).json({ errors: data.errors });
+    }
+
+    const metafields = data.data.metafields.edges.map((edge) => edge.node);
+    res.json({ metafields });
+  } catch (err) {
+    console.error("🔴 Metafield GET error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch metafields" });
+  }
+});
+
+// Write/update metafield
 app.post("/metafields", async (req, res) => {
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
