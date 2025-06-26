@@ -35,10 +35,18 @@ app.get("/metafields", (_, res) => {
 });
 
 app.post("/metafields", async (req, res) => {
+  console.log("Incoming /metafields request:", req.body);
+
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
   if (!orderGID || !key || typeof value === "undefined") {
+    console.error("400 Bad Request: Missing required fields", { orderGID, key, value });
     return res.status(400).json({ error: "Missing required fields: orderGID, key, value" });
+  }
+
+  if (!/^gid:\/\/shopify\/Order\/\d+$/.test(orderGID)) {
+    console.error("400 Bad Request: Invalid orderGID format", { orderGID });
+    return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
   }
 
   const mutation = `
