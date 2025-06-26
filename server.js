@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import axios from "axios";
 import cors from "cors";
@@ -13,7 +14,7 @@ const {
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error("❌ Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
+  console.error("\u274C Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
   process.exit(1);
 }
 
@@ -36,7 +37,6 @@ app.get("/metafields", (_, res) => {
 
 app.post("/metafields", async (req, res) => {
   console.log("Incoming /metafields request:", req.body);
-
   const { orderGID, key, value, type = "single_line_text_field", namespace = "custom" } = req.body;
 
   if (!orderGID || !key || typeof value === "undefined") {
@@ -49,7 +49,6 @@ app.post("/metafields", async (req, res) => {
     return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
   }
 
-  // If value is an empty string, delete the metafield
   if (value === "") {
     const deleteMutation = `
       mutation DeleteMetafield($ownerId: ID!, $namespace: String!, $key: String!) {
@@ -63,21 +62,14 @@ app.post("/metafields", async (req, res) => {
     try {
       const { data } = await axios.post(
         `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-        {
-          query: deleteMutation,
-          variables: { ownerId: orderGID, namespace, key },
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          },
-        }
+        { query: deleteMutation, variables: { ownerId: orderGID, namespace, key } },
+        { headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
       );
 
-      if (data.errors || data.data.metafieldDeleteByOwner.userErrors.length > 0) {
-        console.error("🔴 Metafield delete error:", data.errors || data.data.metafieldDeleteByOwner.userErrors);
-        return res.status(502).json({ errors: data.errors || data.data.metafieldDeleteByOwner.userErrors });
+      const errors = data.errors || data.data.metafieldDeleteByOwner.userErrors;
+      if (errors.length > 0) {
+        console.error("🔴 Metafield delete error:", errors);
+        return res.status(502).json({ errors });
       }
 
       return res.json({ success: true, deletedId: data.data.metafieldDeleteByOwner.deletedId });
@@ -87,7 +79,6 @@ app.post("/metafields", async (req, res) => {
     }
   }
 
-  // Otherwise, proceed with setting metafield
   const mutation = `
     mutation SetMetafields($input: MetafieldsSetInput!) {
       metafieldsSet(metafields: [$input]) {
@@ -105,17 +96,13 @@ app.post("/metafields", async (req, res) => {
     const { data } = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       { query: mutation, variables },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        },
-      }
+      { headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
     );
 
-    if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("🔴 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
-      return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
+    const errors = data.errors || data.data.metafieldsSet.userErrors;
+    if (errors.length > 0) {
+      console.error("🔴 Metafield write error:", errors);
+      return res.status(502).json({ errors });
     }
 
     res.json({ success: true, metafields: data.data.metafieldsSet.metafields });
@@ -125,4 +112,6 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
-// ... Orders and Order by ID endpoints remain unchanged ...
+app.listen(PORT, () => {
+  console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
+});
