@@ -49,7 +49,6 @@ app.post("/metafields", async (req, res) => {
     return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
   }
 
-  // Handle DELETE if value is empty
   if (value === "") {
     const lookupQuery = `
       query GetMetafieldID($ownerId: ID!, $namespace: String!, $key: String!) {
@@ -115,7 +114,6 @@ app.post("/metafields", async (req, res) => {
     }
   }
 
-  // Otherwise: Set metafield normally
   const mutation = `
     mutation SetMetafields($input: MetafieldsSetInput!) {
       metafieldsSet(metafields: [$input]) {
@@ -153,7 +151,6 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
-// 🟢 No changes to orders endpoint
 app.get("/orders", async (req, res) => {
   try {
     const restRes = await axios.get(
@@ -304,6 +301,17 @@ app.get("/orders/:legacyId", async (req, res) => {
       productType: item.node.product?.productType,
     }));
 
+    // ✅ Add note_attributes from REST for single order
+    const noteRes = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyId}.json`,
+      { headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
+    );
+
+    const noteAttributes = {};
+    noteRes.data.order.note_attributes.forEach((na) => {
+      noteAttributes[na.name] = na.value;
+    });
+
     res.json({
       id: node.id,
       legacy_id: node.legacyResourceId,
@@ -314,6 +322,7 @@ app.get("/orders/:legacyId", async (req, res) => {
       total_price: node.totalPriceSet.shopMoney.amount,
       currency: node.totalPriceSet.shopMoney.currencyCode,
       metafields,
+      attributes: noteAttributes,
       line_items: lineItems,
     });
   } catch (err) {
