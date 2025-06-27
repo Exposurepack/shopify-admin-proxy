@@ -49,6 +49,73 @@ app.post("/metafields", async (req, res) => {
     return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
   }
 
+  // Handle DELETE if value is empty
+  if (value === "") {
+    const lookupQuery = `
+      query GetMetafieldID($ownerId: ID!, $namespace: String!, $key: String!) {
+        metafield(ownerId: $ownerId, namespace: $namespace, key: $key) {
+          id
+        }
+      }
+    `;
+
+    try {
+      const lookup = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+        {
+          query: lookupQuery,
+          variables: { ownerId: orderGID, namespace, key },
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          },
+        }
+      );
+
+      const metafieldId = lookup.data?.data?.metafield?.id;
+      if (!metafieldId) {
+        return res.json({ success: true, deleted: false, message: "No metafield to delete" });
+      }
+
+      const deleteMutation = `
+        mutation DeleteMetafield($id: ID!) {
+          metafieldDelete(input: { id: $id }) {
+            deletedId
+            userErrors { field message }
+          }
+        }
+      `;
+
+      const deleteRes = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+        {
+          query: deleteMutation,
+          variables: { id: metafieldId },
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          },
+        }
+      );
+
+      const errors = deleteRes.data?.data?.metafieldDelete?.userErrors;
+      if (errors?.length > 0) {
+        console.error("🔴 Metafield delete error:", errors);
+        return res.status(502).json({ errors });
+      }
+
+      return res.json({ success: true, deleted: true });
+    } catch (err) {
+      console.error("🔴 Metafield DELETE error:", err.response?.data || err.message);
+      return res.status(500).json({ error: "Failed to delete metafield" });
+    }
+  }
+
+  // Otherwise: Set metafield normally
   const mutation = `
     mutation SetMetafields($input: MetafieldsSetInput!) {
       metafieldsSet(metafields: [$input]) {
@@ -86,6 +153,7 @@ app.post("/metafields", async (req, res) => {
   }
 });
 
+// 🟢 No changes to orders endpoint
 app.get("/orders", async (req, res) => {
   try {
     const restRes = await axios.get(
