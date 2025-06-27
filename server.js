@@ -9,11 +9,11 @@ const {
   SHOPIFY_ACCESS_TOKEN,
   SHOPIFY_API_VERSION = "2024-04",
   FRONTEND_SECRET,
-  PORT = 10000,
+  PORT = process.env.PORT || 10000,
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error("\u274C Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
+  console.error("❌ Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
   process.exit(1);
 }
 
@@ -50,6 +50,7 @@ app.post("/metafields", async (req, res) => {
   }
 
   if (value === "") {
+    console.log("🟡 Clearing metafield:", { orderGID, namespace, key });
     const lookupQuery = `
       query GetMetafieldID($ownerId: ID!, $namespace: String!, $key: String!) {
         metafield(ownerId: $ownerId, namespace: $namespace, key: $key) {
@@ -75,9 +76,11 @@ app.post("/metafields", async (req, res) => {
 
       const metafieldId = lookup.data?.data?.metafield?.id;
       if (!metafieldId) {
+        console.log("🟢 No metafield found to delete");
         return res.json({ success: true, deleted: false, message: "No metafield to delete" });
       }
 
+      console.log("🟠 Deleting metafield ID:", metafieldId);
       const deleteMutation = `
         mutation DeleteMetafield($id: ID!) {
           metafieldDelete(input: { id: $id }) {
@@ -103,13 +106,13 @@ app.post("/metafields", async (req, res) => {
 
       const errors = deleteRes.data?.data?.metafieldDelete?.userErrors;
       if (errors?.length > 0) {
-        console.error("\uD83D\uDD34 Metafield delete error:", errors);
+        console.error("🔴 Metafield delete error:", errors);
         return res.status(502).json({ errors });
       }
 
       return res.json({ success: true, deleted: true });
     } catch (err) {
-      console.error("\uD83D\uDD34 Metafield DELETE error:", err.response?.data || err.message);
+      console.error("🔴 Metafield DELETE error:", err.response?.data || err.message);
       return res.status(500).json({ error: "Failed to delete metafield" });
     }
   }
@@ -140,15 +143,19 @@ app.post("/metafields", async (req, res) => {
     );
 
     if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("\uD83D\uDD34 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
+      console.error("🔴 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
       return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
     }
 
     res.json({ success: true, metafields: data.data.metafieldsSet.metafields });
   } catch (err) {
-    console.error("\uD83D\uDD34 Metafield POST error:", err.response?.data || err.message);
+    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to write metafield" });
   }
 });
 
-// orders and order detail routes continue unchanged
+// order routes remain unchanged
+
+app.listen(PORT, () => {
+  console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
+});
