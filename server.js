@@ -13,7 +13,7 @@ const {
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
-  console.error("\u274c Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
+  console.error("❌ Missing env vars: SHOPIFY_STORE_URL, SHOPIFY_ACCESS_TOKEN, FRONTEND_SECRET");
   process.exit(1);
 }
 
@@ -103,13 +103,13 @@ app.post("/metafields", async (req, res) => {
 
       const errors = deleteRes.data?.data?.metafieldDelete?.userErrors;
       if (errors?.length > 0) {
-        console.error("\ud83d\udd34 Metafield delete error:", errors);
+        console.error("🔴 Metafield delete error:", errors);
         return res.status(502).json({ errors });
       }
 
       return res.json({ success: true, deleted: true });
     } catch (err) {
-      console.error("\ud83d\udd34 Metafield DELETE error:", err.response?.data || err.message);
+      console.error("🔴 Metafield DELETE error:", err.response?.data || err.message);
       return res.status(500).json({ error: "Failed to delete metafield" });
     }
   }
@@ -140,68 +140,197 @@ app.post("/metafields", async (req, res) => {
     );
 
     if (data.errors || data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("\ud83d\udd34 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
+      console.error("🔴 Metafield write error:", data.errors || data.data.metafieldsSet.userErrors);
       return res.status(502).json({ errors: data.errors || data.data.metafieldsSet.userErrors });
     }
 
     res.json({ success: true, metafields: data.data.metafieldsSet.metafields });
   } catch (err) {
-    console.error("\ud83d\udd34 Metafield POST error:", err.response?.data || err.message);
+    console.error("🔴 Metafield POST error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to write metafield" });
   }
 });
 
-app.post("/webhooks/fulfillment", async (req, res) => {
+app.get("/orders", async (req, res) => {
   try {
-    const orderId = req.body?.order_id;
-    if (!orderId) return res.status(400).send("Missing order_id in webhook body");
+    const restRes = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=50&status=any`,
+      { headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
+    );
 
-    const orderGID = `gid://shopify/Order/${orderId}`;
-    const melbourneDate = new Date().toLocaleString("en-AU", { timeZone: "Australia/Melbourne" });
-    const isoDate = new Date(melbourneDate).toISOString();
+    const noteMap = {};
+    restRes.data.orders.forEach((order) => {
+      const notes = {};
+      order.note_attributes.forEach((na) => { notes[na.name] = na.value });
+      noteMap[order.id] = notes;
+    });
 
-    const mutation = `
-      mutation SetMetafields($input: MetafieldsSetInput!) {
-        metafieldsSet(metafields: [$input]) {
-          metafields { key value }
-          userErrors { field message }
+    const gqlQuery = `
+      query GetOrders($first: Int!) {
+        orders(first: $first, reverse: true) {
+          edges {
+            cursor
+            node {
+              id legacyResourceId name createdAt displayFinancialStatus displayFulfillmentStatus
+              totalPriceSet { shopMoney { amount currencyCode } }
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    title quantity sku variantTitle vendor
+                    product { title productType }
+                  }
+                }
+              }
+              metafields(first: 20, namespace: "custom") {
+                edges { node { key value type } }
+              }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
         }
       }
     `;
 
-    const variables = {
-      input: {
-        ownerId: orderGID,
-        namespace: "custom",
-        key: "ready_for_dispatch_date_time",
-        type: "date_time",
-        value: isoDate,
-      },
-    };
-
-    const response = await axios.post(
+    const gqlRes = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query: mutation, variables },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        },
-      }
+      { query: gqlQuery, variables: { first: 50 } },
+      { headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
     );
 
-    if (response.data.errors || response.data.data.metafieldsSet.userErrors.length > 0) {
-      console.error("\ud83d\udd34 Webhook metafield write error:", response.data.errors || response.data.data.metafieldsSet.userErrors);
-      return res.status(502).json({ errors: response.data.errors || response.data.data.metafieldsSet.userErrors });
+    if (gqlRes.data.errors) {
+      console.error("🔴 GraphQL Errors:", gqlRes.data.errors);
+      return res.status(502).json({ errors: gqlRes.data.errors });
     }
 
-    res.status(200).send("Webhook processed and metafield updated");
+    const orders = gqlRes.data.data.orders.edges.map(({ cursor, node }) => {
+      const metafields = {};
+      node.metafields.edges.forEach((mf) => { metafields[mf.node.key] = mf.node.value });
+
+      const lineItems = node.lineItems.edges.map((item) => ({
+        title: item.node.title,
+        quantity: item.node.quantity,
+        sku: item.node.sku,
+        variantTitle: item.node.variantTitle,
+        vendor: item.node.vendor,
+        productTitle: item.node.product?.title,
+        productType: item.node.product?.productType,
+      }));
+
+      return {
+        cursor,
+        id: node.id,
+        legacy_id: node.legacyResourceId,
+        name: node.name,
+        created_at: node.createdAt,
+        financial_status: node.displayFinancialStatus,
+        fulfillment_status: node.displayFulfillmentStatus,
+        total_price: node.totalPriceSet.shopMoney.amount,
+        currency: node.totalPriceSet.shopMoney.currencyCode,
+        metafields,
+        attributes: noteMap[node.legacyResourceId] || {},
+        line_items: lineItems,
+      };
+    });
+
+    res.json({
+      orders,
+      count: orders.length,
+      next_cursor: gqlRes.data.data.orders.pageInfo.hasNextPage
+        ? gqlRes.data.data.orders.pageInfo.endCursor
+        : null,
+    });
   } catch (err) {
-    console.error("\ud83d\udd34 Webhook error:", err.response?.data || err.message);
-    res.status(500).send("Webhook failed");
+    console.error("🔴 Order fetch error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+
+app.get("/orders/:legacyId", async (req, res) => {
+  const { legacyId } = req.params;
+
+  try {
+    const gid = `gid://shopify/Order/${legacyId}`;
+
+    const gqlQuery = `
+      query GetOrder($id: ID!) {
+        order(id: $id) {
+          id
+          legacyResourceId
+          name
+          createdAt
+          displayFinancialStatus
+          displayFulfillmentStatus
+          totalPriceSet { shopMoney { amount currencyCode } }
+          lineItems(first: 50) {
+            edges {
+              node {
+                title quantity sku variantTitle vendor
+                product { title productType }
+              }
+            }
+          }
+          metafields(first: 20, namespace: "custom") {
+            edges { node { key value type } }
+          }
+        }
+      }
+    `;
+
+    const gqlRes = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      { query: gqlQuery, variables: { id: gid } },
+      { headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
+    );
+
+    if (gqlRes.data.errors) {
+      console.error("🔴 GraphQL Error:", gqlRes.data.errors);
+      return res.status(502).json({ errors: gqlRes.data.errors });
+    }
+
+    const node = gqlRes.data.data.order;
+    const metafields = {};
+    node.metafields.edges.forEach((mf) => { metafields[mf.node.key] = mf.node.value });
+
+    const lineItems = node.lineItems.edges.map((item) => ({
+      title: item.node.title,
+      quantity: item.node.quantity,
+      sku: item.node.sku,
+      variantTitle: item.node.variantTitle,
+      vendor: item.node.vendor,
+      productTitle: item.node.product?.title,
+      productType: item.node.product?.productType,
+    }));
+
+    // ✅ Add note_attributes from REST for single order
+    const noteRes = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyId}.json`,
+      { headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
+    );
+
+    const noteAttributes = {};
+    noteRes.data.order.note_attributes.forEach((na) => {
+      noteAttributes[na.name] = na.value;
+    });
+
+    res.json({
+      id: node.id,
+      legacy_id: node.legacyResourceId,
+      name: node.name,
+      created_at: node.createdAt,
+      financial_status: node.displayFinancialStatus,
+      fulfillment_status: node.displayFulfillmentStatus,
+      total_price: node.totalPriceSet.shopMoney.amount,
+      currency: node.totalPriceSet.shopMoney.currencyCode,
+      metafields,
+      attributes: noteAttributes,
+      line_items: lineItems,
+    });
+  } catch (err) {
+    console.error("🔴 /orders/:id error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch individual order" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`\u2705 Admin proxy server running at http://localhost:${PORT} for \u2192 ${SHOPIFY_STORE_URL}`);
+  console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
 });
