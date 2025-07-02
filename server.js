@@ -34,6 +34,13 @@ app.get("/metafields", (_, res) => {
   res.status(200).send("Metafields endpoint ready. Use POST to write data.");
 });
 
+// Support POST /metafield (singular) for compatibility
+app.post("/metafield", (req, res, next) => {
+  // Forward to /metafields handler
+  req.url = "/metafields";
+  app._router.handle(req, res, next);
+});
+
 app.post("/metafields", async (req, res) => {
   console.log("Incoming /metafields request:", req.body);
 
@@ -333,4 +340,4 @@ app.get("/orders/:legacyId", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
-});
+}); 
