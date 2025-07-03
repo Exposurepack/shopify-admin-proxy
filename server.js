@@ -179,6 +179,7 @@ app.get("/orders", async (req, res) => {
             cursor
             node {
               id legacyResourceId name createdAt displayFinancialStatus displayFulfillmentStatus
+              tags
               totalPriceSet { shopMoney { amount currencyCode } }
               lineItems(first: 50) {
                 edges {
@@ -231,6 +232,7 @@ app.get("/orders", async (req, res) => {
         created_at: node.createdAt,
         financial_status: node.displayFinancialStatus,
         fulfillment_status: node.displayFulfillmentStatus,
+        tags: node.tags || [],
         total_price: node.totalPriceSet.shopMoney.amount,
         currency: node.totalPriceSet.shopMoney.currencyCode,
         metafields,
@@ -267,6 +269,7 @@ app.get("/orders/:legacyId", async (req, res) => {
           createdAt
           displayFinancialStatus
           displayFulfillmentStatus
+          tags
           totalPriceSet { shopMoney { amount currencyCode } }
           lineItems(first: 50) {
             edges {
@@ -326,6 +329,7 @@ app.get("/orders/:legacyId", async (req, res) => {
       created_at: node.createdAt,
       financial_status: node.displayFinancialStatus,
       fulfillment_status: node.displayFulfillmentStatus,
+      tags: node.tags || [],
       total_price: node.totalPriceSet.shopMoney.amount,
       currency: node.totalPriceSet.shopMoney.currencyCode,
       metafields,
