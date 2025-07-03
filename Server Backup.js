@@ -34,6 +34,13 @@ app.get("/metafields", (_, res) => {
   res.status(200).send("Metafields endpoint ready. Use POST to write data.");
 });
 
+// Support POST /metafield (singular) for compatibility
+app.post("/metafield", (req, res, next) => {
+  // Forward to /metafields handler
+  req.url = "/metafields";
+  app._router.handle(req, res, next);
+});
+
 app.post("/metafields", async (req, res) => {
   console.log("Incoming /metafields request:", req.body);
 
@@ -172,6 +179,7 @@ app.get("/orders", async (req, res) => {
             cursor
             node {
               id legacyResourceId name createdAt displayFinancialStatus displayFulfillmentStatus
+              tags
               totalPriceSet { shopMoney { amount currencyCode } }
               lineItems(first: 50) {
                 edges {
@@ -224,6 +232,7 @@ app.get("/orders", async (req, res) => {
         created_at: node.createdAt,
         financial_status: node.displayFinancialStatus,
         fulfillment_status: node.displayFulfillmentStatus,
+        tags: node.tags || [],
         total_price: node.totalPriceSet.shopMoney.amount,
         currency: node.totalPriceSet.shopMoney.currencyCode,
         metafields,
@@ -260,6 +269,7 @@ app.get("/orders/:legacyId", async (req, res) => {
           createdAt
           displayFinancialStatus
           displayFulfillmentStatus
+          tags
           totalPriceSet { shopMoney { amount currencyCode } }
           lineItems(first: 50) {
             edges {
@@ -319,6 +329,7 @@ app.get("/orders/:legacyId", async (req, res) => {
       created_at: node.createdAt,
       financial_status: node.displayFinancialStatus,
       fulfillment_status: node.displayFulfillmentStatus,
+      tags: node.tags || [],
       total_price: node.totalPriceSet.shopMoney.amount,
       currency: node.totalPriceSet.shopMoney.currencyCode,
       metafields,
@@ -333,4 +344,4 @@ app.get("/orders/:legacyId", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
-});
+}); 
