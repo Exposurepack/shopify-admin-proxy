@@ -247,25 +247,15 @@ app.post("/upload-file", upload.single('file'), async (req, res) => {
     console.log("✅ Staged upload URL created:", stagedTarget.url);
 
     // Step 2: Upload the file to the staged URL
-    const formData = new FormData();
-    
-    // Add all the required parameters from Shopify
-    stagedTarget.parameters.forEach(param => {
-      formData.append(param.name, param.value);
-    });
-    
-    // Add the file last
-    formData.append('file', req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype
-    });
-
-    const uploadResponse = await axios.post(stagedTarget.url, formData, {
+    // For Google Cloud Storage, we need to upload as binary data, not multipart form
+    const uploadResponse = await axios.put(stagedTarget.url, req.file.buffer, {
       headers: {
-        ...formData.getHeaders(),
+        'Content-Type': req.file.mimetype,
+        'Content-Length': req.file.size.toString()
       },
       maxContentLength: Infinity,
-      maxBodyLength: Infinity
+      maxBodyLength: Infinity,
+      timeout: 30000 // 30 second timeout
     });
 
     console.log("✅ File uploaded to staged URL, status:", uploadResponse.status);
