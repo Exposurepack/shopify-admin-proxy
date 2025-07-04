@@ -82,10 +82,15 @@ app.post("/metafields", async (req, res) => {
   }
 
   if (value === "") {
+    console.log(`🔍 Looking up metafield for deletion: ownerId=${orderGID}, namespace=${namespace}, key=${key}`);
+    
     const lookupQuery = `
       query GetMetafieldID($ownerId: ID!, $namespace: String!, $key: String!) {
         metafield(ownerId: $ownerId, namespace: $namespace, key: $key) {
           id
+          namespace
+          key
+          value
         }
       }
     `;
@@ -105,10 +110,58 @@ app.post("/metafields", async (req, res) => {
         }
       );
 
+      console.log(`🔍 Lookup response:`, JSON.stringify(lookup.data, null, 2));
+      
       const metafieldId = lookup.data?.data?.metafield?.id;
       if (!metafieldId) {
+        console.log(`❌ No metafield found for deletion with ownerId=${orderGID}, namespace=${namespace}, key=${key}`);
+        
+        // Let's list all metafields for this order to see what exists
+        const listQuery = `
+          query ListMetafields($ownerId: ID!) {
+            node(id: $ownerId) {
+              ... on Order {
+                metafields(first: 50) {
+                  edges {
+                    node {
+                      id
+                      namespace
+                      key
+                      value
+                      type
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `;
+        
+        try {
+          const listRes = await axios.post(
+            `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+            {
+              query: listQuery,
+              variables: { ownerId: orderGID },
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+              },
+            }
+          );
+          
+          console.log(`📋 All metafields for order ${orderGID}:`, JSON.stringify(listRes.data?.data?.node?.metafields, null, 2));
+        } catch (listErr) {
+          console.log(`❌ Failed to list metafields:`, listErr.message);
+        }
+        
         return res.json({ success: true, deleted: false, message: "No metafield to delete" });
       }
+      
+      console.log(`✅ Found metafield to delete: ${metafieldId}`);
+      
 
       const deleteMutation = `
         mutation DeleteMetafield($id: ID!) {
