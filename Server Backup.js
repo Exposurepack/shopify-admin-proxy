@@ -2,6 +2,8 @@ import express from "express";
 import axios from "axios";
 import cors from "cors";
 import dotenv from "dotenv";
+import multer from "multer";
+import FormData from "form-data";
 dotenv.config();
 
 const {
@@ -19,7 +21,30 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow images and design files
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|ai|eps|svg|psd/;
+    const extname = allowedTypes.test(file.originalname.toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype) || 
+                    file.mimetype === 'application/pdf' ||
+                    file.mimetype === 'application/postscript' ||
+                    file.mimetype === 'image/svg+xml';
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only images and design files are allowed'));
+    }
+  }
+});
 
 app.use((req, res, next) => {
   if (req.headers["x-api-key"] !== FRONTEND_SECRET) {
@@ -155,6 +180,189 @@ app.post("/metafields", async (req, res) => {
   } catch (err) {
     console.error("🔴 Metafield POST error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to write metafield" });
+  }
+});
+
+// File upload endpoint using Shopify's File API
+app.post("/upload-file", upload.single('file'), async (req, res) => {
+  console.log("Incoming /upload-file request");
+
+  if (!req.file) {
+    return res.status(400).json({ error: "No file provided" });
+  }
+
+  const { orderGID, filename } = req.body;
+
+  if (!orderGID) {
+    return res.status(400).json({ error: "Missing orderGID" });
+  }
+
+  if (!/^gid:\/\/shopify\/Order\/\d+$/.test(orderGID)) {
+    return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
+  }
+
+  try {
+    console.log(`📁 Uploading file: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    // Step 1: Create a staged upload URL
+    const stagedUploadMutation = `
+      mutation StagedUploadCreate($input: [StagedUploadInput!]!) {
+        stagedUploadsCreate(input: $input) {
+          stagedTargets {
+            url
+            resourceUrl
+            parameters { name value }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const uploadInput = {
+      filename: filename || req.file.originalname,
+      mimeType: req.file.mimetype,
+      resource: "FILE"
+    };
+
+    const stagedUploadRes = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        query: stagedUploadMutation,
+        variables: { input: [uploadInput] }
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (stagedUploadRes.data.errors || stagedUploadRes.data.data.stagedUploadsCreate.userErrors.length > 0) {
+      console.error("🔴 Staged upload error:", stagedUploadRes.data.errors || stagedUploadRes.data.data.stagedUploadsCreate.userErrors);
+      return res.status(502).json({ error: "Failed to create staged upload" });
+    }
+
+    const stagedTarget = stagedUploadRes.data.data.stagedUploadsCreate.stagedTargets[0];
+    console.log("✅ Staged upload URL created:", stagedTarget.url);
+
+    // Step 2: Upload the file to the staged URL
+    // For Google Cloud Storage, we need to upload as binary data, not multipart form
+    const uploadResponse = await axios.put(stagedTarget.url, req.file.buffer, {
+      headers: {
+        'Content-Type': req.file.mimetype,
+        'Content-Length': req.file.size.toString()
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: 30000 // 30 second timeout
+    });
+
+    console.log("✅ File uploaded to staged URL, status:", uploadResponse.status);
+
+    // Step 3: Create the file in Shopify using the staged upload
+    const fileCreateMutation = `
+      mutation FileCreate($files: [FileCreateInput!]!) {
+        fileCreate(files: $files) {
+          files {
+            id
+            url
+            fileStatus
+            alt
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const fileInput = {
+      originalSource: stagedTarget.resourceUrl,
+      filename: req.file.originalname,
+      alt: `Design file for order ${orderGID}`
+    };
+
+    const fileCreateRes = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        query: fileCreateMutation,
+        variables: { files: [fileInput] }
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (fileCreateRes.data.errors || fileCreateRes.data.data.fileCreate.userErrors.length > 0) {
+      console.error("🔴 File create error:", fileCreateRes.data.errors || fileCreateRes.data.data.fileCreate.userErrors);
+      return res.status(502).json({ error: "Failed to create file in Shopify" });
+    }
+
+    const createdFile = fileCreateRes.data.data.fileCreate.files[0];
+    console.log("✅ File created in Shopify:", createdFile.id, createdFile.url);
+
+    // Step 4: Save the file URL to the order metafield
+    const fileMetadata = {
+      id: createdFile.id,
+      url: createdFile.url,
+      filename: req.file.originalname,
+      size: req.file.size,
+      type: req.file.mimetype,
+      uploadedAt: new Date().toISOString()
+    };
+
+    const metafieldPayload = {
+      orderGID,
+      key: 'design_artworks_file',
+      value: JSON.stringify(fileMetadata),
+      type: 'single_line_text_field',
+      namespace: 'custom'
+    };
+
+    const metafieldResponse = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        query: `
+          mutation SetMetafields($input: MetafieldsSetInput!) {
+            metafieldsSet(metafields: [$input]) {
+              metafields { key value }
+              userErrors { field message }
+            }
+          }
+        `,
+        variables: { input: metafieldPayload }
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        },
+      }
+    );
+
+    if (metafieldResponse.data.errors || metafieldResponse.data.data.metafieldsSet.userErrors.length > 0) {
+      console.error("🔴 Metafield save error:", metafieldResponse.data.errors || metafieldResponse.data.data.metafieldsSet.userErrors);
+      return res.status(502).json({ error: "File uploaded but failed to save metafield" });
+    }
+
+    console.log("✅ File metadata saved to metafield");
+
+    res.json({
+      success: true,
+      file: {
+        id: createdFile.id,
+        url: createdFile.url,
+        filename: req.file.originalname,
+        size: req.file.size,
+        type: req.file.mimetype
+      }
+    });
+
+  } catch (err) {
+    console.error("🔴 File upload error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to upload file" });
   }
 });
 
