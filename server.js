@@ -86,11 +86,15 @@ app.post("/metafields", async (req, res) => {
     
     const lookupQuery = `
       query GetMetafieldID($ownerId: ID!, $namespace: String!, $key: String!) {
-        metafield(ownerId: $ownerId, namespace: $namespace, key: $key) {
-          id
-          namespace
-          key
-          value
+        node(id: $ownerId) {
+          ... on Order {
+            metafield(namespace: $namespace, key: $key) {
+              id
+              namespace
+              key
+              value
+            }
+          }
         }
       }
     `;
@@ -112,7 +116,7 @@ app.post("/metafields", async (req, res) => {
 
       console.log(`🔍 Lookup response:`, JSON.stringify(lookup.data, null, 2));
       
-      const metafieldId = lookup.data?.data?.metafield?.id;
+      const metafieldId = lookup.data?.data?.node?.metafield?.id;
       if (!metafieldId) {
         console.log(`❌ No metafield found for deletion with ownerId=${orderGID}, namespace=${namespace}, key=${key}`);
         
