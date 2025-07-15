@@ -697,6 +697,13 @@ app.post("/fulfillments", async (req, res) => {
 
     const order = orderResponse.data.order;
     
+    console.log('🔍 Order location info:', {
+      processing_location_id: order.processing_location_id,
+      location_id: order.location_id,
+      source_name: order.source_name,
+      order_id: order.id
+    });
+    
     // Get all fulfillable line items
     const lineItems = order.line_items.filter(item => item.fulfillable_quantity > 0).map(item => ({
       id: item.id,
@@ -708,10 +715,40 @@ app.post("/fulfillments", async (req, res) => {
       return res.status(400).json({ error: "No fulfillable line items found" });
     }
 
+    // Get a valid location_id if the order doesn't have one
+    let locationId = order.processing_location_id || order.location_id;
+    
+    if (!locationId) {
+      console.log('⚠️ No location_id found in order, fetching store locations...');
+      try {
+        const locationsResponse = await axios.get(
+          `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/locations.json`,
+          {
+            headers: {
+              'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+            }
+          }
+        );
+        
+        // Use the first active location
+        const activeLocation = locationsResponse.data.locations.find(loc => loc.active);
+        if (activeLocation) {
+          locationId = activeLocation.id;
+          console.log('✅ Using active location:', activeLocation.name, 'ID:', locationId);
+        } else {
+          console.error('❌ No active locations found');
+          return res.status(400).json({ error: "No active locations found for fulfillment" });
+        }
+      } catch (locError) {
+        console.error('❌ Error fetching locations:', locError.response?.data || locError.message);
+        return res.status(500).json({ error: "Failed to fetch store locations" });
+      }
+    }
+
     // Create fulfillment
     const fulfillmentData = {
       fulfillment: {
-        location_id: order.processing_location_id || order.location_id || null,
+        location_id: locationId,
         tracking_number: trackingNumber,
         tracking_company: carrier.toUpperCase(), // Convert to uppercase for Shopify compatibility
         tracking_urls: [],
