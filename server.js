@@ -711,9 +711,9 @@ app.post("/fulfillments", async (req, res) => {
     // Create fulfillment
     const fulfillmentData = {
       fulfillment: {
-        location_id: order.processing_location_id || null,
+        location_id: order.processing_location_id || order.location_id || null,
         tracking_number: trackingNumber,
-        tracking_company: carrier,
+        tracking_company: carrier.toUpperCase(), // Convert to uppercase for Shopify compatibility
         tracking_urls: [],
         notify_customer: true,
         line_items: lineItems
@@ -750,7 +750,14 @@ app.post("/fulfillments", async (req, res) => {
       });
     }
     
-    res.status(500).json({ error: 'Failed to create fulfillment' });
+    if (error.response?.status === 406) {
+      return res.status(406).json({ 
+        error: 'Request not acceptable', 
+        details: error.response.data || 'The fulfillment request format is not acceptable to Shopify. Please check tracking_company and location_id values.' 
+      });
+    }
+    
+    res.status(500).json({ error: 'Failed to create fulfillment', details: error.response?.data || error.message });
   }
 });
 
