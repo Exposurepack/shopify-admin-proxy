@@ -704,15 +704,42 @@ app.post("/fulfillments", async (req, res) => {
       order_id: order.id
     });
     
+    console.log('🔍 Order fulfillment info:', {
+      fulfillment_status: order.fulfillment_status,
+      fulfilled_at: order.fulfilled_at,
+      fulfillments: order.fulfillments?.length || 0
+    });
+    
     // Get all fulfillable line items
-    const lineItems = order.line_items.filter(item => item.fulfillable_quantity > 0).map(item => ({
+    console.log('🔍 All line items:', order.line_items.map(item => ({
       id: item.id,
+      name: item.name,
+      quantity: item.quantity,
+      fulfillable_quantity: item.fulfillable_quantity,
+      fulfillment_status: item.fulfillment_status
+    })));
+    
+    const lineItems = order.line_items.filter(item => item.fulfillable_quantity > 0).map(item => ({
+      id: String(item.id), // Ensure ID is a string
       quantity: item.fulfillable_quantity
     }));
 
     if (lineItems.length === 0) {
       console.error("❌ No fulfillable line items found");
+      console.error("❌ Order might already be fulfilled or have other issues");
+      
+      // Check if order is already fulfilled
+      if (order.fulfillment_status === 'fulfilled') {
+        return res.status(400).json({ error: "Order is already fully fulfilled" });
+      }
+      
       return res.status(400).json({ error: "No fulfillable line items found" });
+    }
+    
+    // Check if order is already fulfilled
+    if (order.fulfillment_status === 'fulfilled') {
+      console.error("❌ Order is already fully fulfilled");
+      return res.status(400).json({ error: "Order is already fully fulfilled" });
     }
 
     // Get a valid location_id if the order doesn't have one
@@ -745,19 +772,38 @@ app.post("/fulfillments", async (req, res) => {
       }
     }
 
-    // Create fulfillment
-    const fulfillmentData = {
+    // Create fulfillment - try simple approach first
+    let fulfillmentData = {
       fulfillment: {
         location_id: locationId,
         tracking_number: trackingNumber,
-        tracking_company: carrier.toUpperCase(), // Convert to uppercase for Shopify compatibility
-        tracking_urls: [],
         notify_customer: true,
         line_items: lineItems
       }
     };
 
-    console.log('🚚 Creating fulfillment with data:', fulfillmentData);
+    // Map carrier names to Shopify-compatible values
+    const carrierMapping = {
+      'TNT': 'Other', // TNT might not be supported, use Other
+      'UPS': 'UPS',
+      'FEDEX': 'FedEx', 
+      'DHL': 'DHL',
+      'USPS': 'USPS',
+      'AUSTRALIA POST': 'Australia Post',
+      'STARTRACK': 'StarTrack',
+      'COURIER': 'Other',
+      'OTHER': 'Other'
+    };
+    
+    const upperCarrier = carrier.toUpperCase();
+    const mappedCarrier = carrierMapping[upperCarrier] || 'Other';
+    
+    // Always include tracking_company
+    fulfillmentData.fulfillment.tracking_company = mappedCarrier;
+    
+    console.log(`🚚 Mapping carrier "${carrier}" -> "${mappedCarrier}"`);
+    console.log('🚚 Creating fulfillment with data:', JSON.stringify(fulfillmentData, null, 2));
+    console.log('🚚 Line items details:', lineItems);
 
     const fulfillmentResponse = await axios.post(
       `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyOrderId}/fulfillments.json`,
@@ -779,6 +825,10 @@ app.post("/fulfillments", async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error creating fulfillment:', error.response?.data || error.message);
+    console.error('❌ Full error response:', JSON.stringify(error.response?.data, null, 2));
+    console.error('❌ Request URL:', error.config?.url);
+    console.error('❌ Request method:', error.config?.method);
+    console.error('❌ Request headers:', error.config?.headers);
     
     if (error.response?.status === 422) {
       return res.status(422).json({ 
