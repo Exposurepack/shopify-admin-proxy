@@ -423,6 +423,61 @@ app.post("/upload-file", upload.single('file'), async (req, res) => {
   }
 });
 
+// NEW: REST API endpoint for individual order details with full REST API data
+app.get("/rest/orders/:legacyId", async (req, res) => {
+  const { legacyId } = req.params;
+
+  try {
+    console.log('🔄 Fetching REST order details for legacy ID:', legacyId);
+
+    // Fetch complete order details from Shopify REST API
+    const response = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    const order = response.data.order;
+    console.log('✅ REST order details fetched for:', order.name);
+
+    res.json({ order });
+
+  } catch (error) {
+    console.error('❌ Error fetching REST order details:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch order details' });
+  }
+});
+
+// NEW: REST API endpoint for location details
+app.get("/rest/locations", async (req, res) => {
+  try {
+    console.log('🔄 Fetching locations from Shopify REST API');
+
+    // Fetch locations from Shopify REST API
+    const response = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/locations.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    const locations = response.data.locations;
+    console.log('✅ Fetched', locations.length, 'locations');
+
+    res.json({ locations });
+
+  } catch (error) {
+    console.error('❌ Error fetching locations:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch locations' });
+  }
+});
+
+// Original GraphQL-based orders endpoint
 app.get("/orders", async (req, res) => {
   try {
     const restRes = await axios.get(
@@ -519,6 +574,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
+// Original GraphQL-based single order endpoint
 app.get("/orders/:legacyId", async (req, res) => {
   const { legacyId } = req.params;
 
@@ -609,4 +665,9 @@ app.get("/orders/:legacyId", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
+  console.log('🔄 Available endpoints:');
+  console.log('  - GraphQL: /orders, /orders/:id');
+  console.log('  - REST: /rest/orders/:id, /rest/locations');
+  console.log('  - Metafields: /metafields');
+  console.log('  - Files: /upload-file');
 }); 
