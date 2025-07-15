@@ -663,6 +663,97 @@ app.get("/orders/:legacyId", async (req, res) => {
   }
 });
 
+// NEW: Create fulfillment endpoint
+app.post("/fulfillments", async (req, res) => {
+  console.log("Incoming /fulfillments request:", req.body);
+
+  const { orderGID, trackingNumber, carrier, timestamp } = req.body;
+
+  if (!orderGID || !trackingNumber || !carrier) {
+    console.error("400 Bad Request: Missing required fields", { orderGID, trackingNumber, carrier });
+    return res.status(400).json({ error: "Missing required fields: orderGID, trackingNumber, carrier" });
+  }
+
+  if (!/^gid:\/\/shopify\/Order\/\d+$/.test(orderGID)) {
+    console.error("400 Bad Request: Invalid orderGID format", { orderGID });
+    return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
+  }
+
+  try {
+    // Extract legacy order ID from GID
+    const legacyOrderId = orderGID.split('/').pop();
+    
+    console.log(`🚚 Creating fulfillment for order ${legacyOrderId}`);
+
+    // First, get the order to get all line items
+    const orderResponse = await axios.get(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyOrderId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    const order = orderResponse.data.order;
+    
+    // Get all fulfillable line items
+    const lineItems = order.line_items.filter(item => item.fulfillable_quantity > 0).map(item => ({
+      id: item.id,
+      quantity: item.fulfillable_quantity
+    }));
+
+    if (lineItems.length === 0) {
+      console.error("❌ No fulfillable line items found");
+      return res.status(400).json({ error: "No fulfillable line items found" });
+    }
+
+    // Create fulfillment
+    const fulfillmentData = {
+      fulfillment: {
+        location_id: order.processing_location_id || null,
+        tracking_number: trackingNumber,
+        tracking_company: carrier,
+        tracking_urls: [],
+        notify_customer: true,
+        line_items: lineItems
+      }
+    };
+
+    console.log('🚚 Creating fulfillment with data:', fulfillmentData);
+
+    const fulfillmentResponse = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyOrderId}/fulfillments.json`,
+      fulfillmentData,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log('✅ Fulfillment created:', fulfillmentResponse.data.fulfillment.id);
+
+    res.json({ 
+      success: true, 
+      fulfillment: fulfillmentResponse.data.fulfillment 
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating fulfillment:', error.response?.data || error.message);
+    
+    if (error.response?.status === 422) {
+      return res.status(422).json({ 
+        error: 'Validation error', 
+        details: error.response.data.errors 
+      });
+    }
+    
+    res.status(500).json({ error: 'Failed to create fulfillment' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
   console.log('🔄 Available endpoints:');
@@ -670,4 +761,5 @@ app.listen(PORT, () => {
   console.log('  - REST: /rest/orders/:id, /rest/locations');
   console.log('  - Metafields: /metafields');
   console.log('  - Files: /upload-file');
+  console.log('  - Fulfillments: /fulfillments');
 }); 
