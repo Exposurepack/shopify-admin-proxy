@@ -501,14 +501,18 @@ app.get("/orders", async (req, res) => {
               id legacyResourceId name createdAt displayFinancialStatus displayFulfillmentStatus
               tags
               totalPriceSet { shopMoney { amount currencyCode } }
-              lineItems(first: 50) {
-                edges {
-                  node {
-                    title quantity sku variantTitle vendor
-                    product { title productType }
-                  }
-                }
+                        lineItems(first: 50) {
+            edges {
+              node {
+                title quantity sku variantTitle vendor
+                originalUnitPriceSet { shopMoney { amount currencyCode } }
+                discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                originalTotalSet { shopMoney { amount currencyCode } }
+                discountedTotalSet { shopMoney { amount currencyCode } }
+                product { title productType }
               }
+            }
+          }
               metafields(first: 20, namespace: "custom") {
                 edges { node { key value type } }
               }
@@ -542,6 +546,10 @@ app.get("/orders", async (req, res) => {
         vendor: item.node.vendor,
         productTitle: item.node.product?.title,
         productType: item.node.product?.productType,
+        unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
+        line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
+        original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
+        original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
       }));
 
       return {
@@ -596,6 +604,10 @@ app.get("/orders/:legacyId", async (req, res) => {
             edges {
               node {
                 title quantity sku variantTitle vendor
+                originalUnitPriceSet { shopMoney { amount currencyCode } }
+                discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                originalTotalSet { shopMoney { amount currencyCode } }
+                discountedTotalSet { shopMoney { amount currencyCode } }
                 product { title productType }
               }
             }
@@ -630,6 +642,10 @@ app.get("/orders/:legacyId", async (req, res) => {
       vendor: item.node.vendor,
       productTitle: item.node.product?.title,
       productType: item.node.product?.productType,
+      unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
+      line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
+      original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
+      original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
     }));
 
     // ✅ Add note_attributes from REST for single order
