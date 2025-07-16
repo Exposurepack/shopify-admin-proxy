@@ -501,14 +501,18 @@ app.get("/orders", async (req, res) => {
               id legacyResourceId name createdAt displayFinancialStatus displayFulfillmentStatus
               tags
               totalPriceSet { shopMoney { amount currencyCode } }
-              lineItems(first: 50) {
-                edges {
-                  node {
-                    title quantity sku variantTitle vendor
-                    product { title productType }
-                  }
-                }
+                        lineItems(first: 50) {
+            edges {
+              node {
+                title quantity sku variantTitle vendor
+                originalUnitPriceSet { shopMoney { amount currencyCode } }
+                discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                originalTotalSet { shopMoney { amount currencyCode } }
+                discountedTotalSet { shopMoney { amount currencyCode } }
+                product { title productType }
               }
+            }
+          }
               metafields(first: 20, namespace: "custom") {
                 edges { node { key value type } }
               }
@@ -542,6 +546,10 @@ app.get("/orders", async (req, res) => {
         vendor: item.node.vendor,
         productTitle: item.node.product?.title,
         productType: item.node.product?.productType,
+        unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
+        line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
+        original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
+        original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
       }));
 
       return {
@@ -596,6 +604,10 @@ app.get("/orders/:legacyId", async (req, res) => {
             edges {
               node {
                 title quantity sku variantTitle vendor
+                originalUnitPriceSet { shopMoney { amount currencyCode } }
+                discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                originalTotalSet { shopMoney { amount currencyCode } }
+                discountedTotalSet { shopMoney { amount currencyCode } }
                 product { title productType }
               }
             }
@@ -630,6 +642,10 @@ app.get("/orders/:legacyId", async (req, res) => {
       vendor: item.node.vendor,
       productTitle: item.node.product?.title,
       productType: item.node.product?.productType,
+      unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
+      line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
+      original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
+      original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
     }));
 
     // ✅ Add note_attributes from REST for single order
@@ -663,191 +679,6 @@ app.get("/orders/:legacyId", async (req, res) => {
   }
 });
 
-// NEW: Create fulfillment endpoint
-app.post("/fulfillments", async (req, res) => {
-  console.log("Incoming /fulfillments request:", req.body);
-
-  const { orderGID, trackingNumber, carrier, timestamp } = req.body;
-
-  if (!orderGID || !trackingNumber || !carrier) {
-    console.error("400 Bad Request: Missing required fields", { orderGID, trackingNumber, carrier });
-    return res.status(400).json({ error: "Missing required fields: orderGID, trackingNumber, carrier" });
-  }
-
-  if (!/^gid:\/\/shopify\/Order\/\d+$/.test(orderGID)) {
-    console.error("400 Bad Request: Invalid orderGID format", { orderGID });
-    return res.status(400).json({ error: "Invalid orderGID format. Must be gid://shopify/Order/ORDER_ID" });
-  }
-
-  try {
-    // Extract legacy order ID from GID
-    const legacyOrderId = orderGID.split('/').pop();
-    
-    console.log(`🚚 Creating fulfillment for order ${legacyOrderId}`);
-
-    // First, get the order to get all line items
-    const orderResponse = await axios.get(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyOrderId}.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
-        }
-      }
-    );
-
-    const order = orderResponse.data.order;
-    
-    console.log('🔍 Order location info:', {
-      processing_location_id: order.processing_location_id,
-      location_id: order.location_id,
-      source_name: order.source_name,
-      order_id: order.id
-    });
-    
-    console.log('🔍 Order fulfillment info:', {
-      fulfillment_status: order.fulfillment_status,
-      fulfilled_at: order.fulfilled_at,
-      fulfillments: order.fulfillments?.length || 0
-    });
-    
-    // Get all fulfillable line items
-    console.log('🔍 All line items:', order.line_items.map(item => ({
-      id: item.id,
-      name: item.name,
-      quantity: item.quantity,
-      fulfillable_quantity: item.fulfillable_quantity,
-      fulfillment_status: item.fulfillment_status
-    })));
-    
-    const lineItems = order.line_items.filter(item => item.fulfillable_quantity > 0).map(item => ({
-      id: String(item.id), // Ensure ID is a string
-      quantity: item.fulfillable_quantity
-    }));
-
-    if (lineItems.length === 0) {
-      console.error("❌ No fulfillable line items found");
-      console.error("❌ Order might already be fulfilled or have other issues");
-      
-      // Check if order is already fulfilled
-      if (order.fulfillment_status === 'fulfilled') {
-        return res.status(400).json({ error: "Order is already fully fulfilled" });
-      }
-      
-      return res.status(400).json({ error: "No fulfillable line items found" });
-    }
-    
-    // Check if order is already fulfilled
-    if (order.fulfillment_status === 'fulfilled') {
-      console.error("❌ Order is already fully fulfilled");
-      return res.status(400).json({ error: "Order is already fully fulfilled" });
-    }
-
-    // Get a valid location_id if the order doesn't have one
-    let locationId = order.processing_location_id || order.location_id;
-    
-    if (!locationId) {
-      console.log('⚠️ No location_id found in order, fetching store locations...');
-      try {
-        const locationsResponse = await axios.get(
-          `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/locations.json`,
-          {
-            headers: {
-              'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
-            }
-          }
-        );
-        
-        // Use the first active location
-        const activeLocation = locationsResponse.data.locations.find(loc => loc.active);
-        if (activeLocation) {
-          locationId = activeLocation.id;
-          console.log('✅ Using active location:', activeLocation.name, 'ID:', locationId);
-        } else {
-          console.error('❌ No active locations found');
-          return res.status(400).json({ error: "No active locations found for fulfillment" });
-        }
-      } catch (locError) {
-        console.error('❌ Error fetching locations:', locError.response?.data || locError.message);
-        return res.status(500).json({ error: "Failed to fetch store locations" });
-      }
-    }
-
-    // Create fulfillment - try simple approach first
-    let fulfillmentData = {
-      fulfillment: {
-        location_id: locationId,
-        tracking_number: trackingNumber,
-        notify_customer: true,
-        line_items: lineItems
-      }
-    };
-
-    // Map carrier names to Shopify-compatible values
-    const carrierMapping = {
-      'TNT': 'Other', // TNT might not be supported, use Other
-      'UPS': 'UPS',
-      'FEDEX': 'FedEx', 
-      'DHL': 'DHL',
-      'USPS': 'USPS',
-      'AUSTRALIA POST': 'Australia Post',
-      'STARTRACK': 'StarTrack',
-      'COURIER': 'Other',
-      'OTHER': 'Other'
-    };
-    
-    const upperCarrier = carrier.toUpperCase();
-    const mappedCarrier = carrierMapping[upperCarrier] || 'Other';
-    
-    // Always include tracking_company
-    fulfillmentData.fulfillment.tracking_company = mappedCarrier;
-    
-    console.log(`🚚 Mapping carrier "${carrier}" -> "${mappedCarrier}"`);
-    console.log('🚚 Creating fulfillment with data:', JSON.stringify(fulfillmentData, null, 2));
-    console.log('🚚 Line items details:', lineItems);
-
-    const fulfillmentResponse = await axios.post(
-      `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders/${legacyOrderId}/fulfillments.json`,
-      fulfillmentData,
-      {
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    console.log('✅ Fulfillment created:', fulfillmentResponse.data.fulfillment.id);
-
-    res.json({ 
-      success: true, 
-      fulfillment: fulfillmentResponse.data.fulfillment 
-    });
-
-  } catch (error) {
-    console.error('❌ Error creating fulfillment:', error.response?.data || error.message);
-    console.error('❌ Full error response:', JSON.stringify(error.response?.data, null, 2));
-    console.error('❌ Request URL:', error.config?.url);
-    console.error('❌ Request method:', error.config?.method);
-    console.error('❌ Request headers:', error.config?.headers);
-    
-    if (error.response?.status === 422) {
-      return res.status(422).json({ 
-        error: 'Validation error', 
-        details: error.response.data.errors 
-      });
-    }
-    
-    if (error.response?.status === 406) {
-      return res.status(406).json({ 
-        error: 'Request not acceptable', 
-        details: error.response.data || 'The fulfillment request format is not acceptable to Shopify. Please check tracking_company and location_id values.' 
-      });
-    }
-    
-    res.status(500).json({ error: 'Failed to create fulfillment', details: error.response?.data || error.message });
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`✅ Admin proxy server running at http://localhost:${PORT} for → ${SHOPIFY_STORE_URL}`);
   console.log('🔄 Available endpoints:');
@@ -855,5 +686,4 @@ app.listen(PORT, () => {
   console.log('  - REST: /rest/orders/:id, /rest/locations');
   console.log('  - Metafields: /metafields');
   console.log('  - Files: /upload-file');
-  console.log('  - Fulfillments: /fulfillments');
 }); 
