@@ -266,26 +266,32 @@ class MetafieldManager {
   }
 
   async deleteMetafield(metafieldId) {
-    const mutation = `
-      mutation DeleteMetafield($id: ID!) {
-        metafieldDelete(input: { id: $id }) {
-          deletedId
-          userErrors { 
-            field 
-            message 
-          }
+    // Extract numeric ID from GID format
+    const numericId = metafieldId.replace('gid://shopify/Metafield/', '');
+    
+    try {
+      // Use REST API for metafield deletion (more reliable across API versions)
+      const response = await axios.delete(
+        `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/metafields/${numericId}.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+            "Content-Type": "application/json"
+          },
+          timeout: 30000
         }
+      );
+
+      console.log(`✅ Successfully deleted metafield via REST: ${metafieldId}`);
+      return { id: metafieldId };
+
+    } catch (error) {
+      if (error.response?.status === 404) {
+        console.log(`ℹ️ Metafield not found (already deleted): ${metafieldId}`);
+        return { id: metafieldId };
       }
-    `;
-
-    const data = await this.client.query(mutation, { id: metafieldId });
-    const result = data.data.metafieldDelete;
-
-    if (result.userErrors?.length > 0) {
-      throw new Error(`Metafield deletion failed: ${result.userErrors.map(e => e.message).join(', ')}`);
+      throw new Error(`Metafield deletion failed: ${error.response?.data?.errors || error.message}`);
     }
-
-    return { id: result.deletedId };
   }
 
   async setMetafield(ownerId, namespace, key, value, type = "single_line_text_field") {
