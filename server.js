@@ -987,7 +987,6 @@ app.get("/orders/:id", async (req, res) => {
           name
           createdAt
           updatedAt
-          processedAt
           displayFinancialStatus
           displayFulfillmentStatus
           tags
@@ -1000,37 +999,11 @@ app.get("/orders/:id", async (req, res) => {
               currencyCode
             }
           }
-          subtotalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-          }
-          totalTaxSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-          }
-          totalShippingPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-          }
           customer {
             id
             displayName
             email
             phone
-            defaultAddress {
-              address1
-              address2
-              city
-              province
-              country
-              zip
-            }
           }
           billingAddress {
             firstName
@@ -1107,12 +1080,6 @@ app.get("/orders/:id", async (req, res) => {
               }
             }
           }
-          fulfillments {
-            trackingCompany
-            trackingNumbers
-            status
-            createdAt
-          }
         }
       }
     `;
@@ -1162,7 +1129,6 @@ app.get("/orders/:id", async (req, res) => {
       name: node.name,
       created_at: node.createdAt,
       updated_at: node.updatedAt,
-      processed_at: node.processedAt,
       financial_status: node.displayFinancialStatus,
       fulfillment_status: node.displayFulfillmentStatus,
       tags: node.tags || [],
@@ -1170,20 +1136,15 @@ app.get("/orders/:id", async (req, res) => {
       email: node.email,
       phone: node.phone,
       total_price: node.totalPriceSet.shopMoney.amount,
-      subtotal_price: node.subtotalPriceSet?.shopMoney?.amount,
-      total_tax: node.totalTaxSet?.shopMoney?.amount,
-      total_shipping: node.totalShippingPriceSet?.shopMoney?.amount,
       currency: node.totalPriceSet.shopMoney.currencyCode,
       customer: node.customer ? {
         id: node.customer.id,
         name: node.customer.displayName,
         email: node.customer.email,
-        phone: node.customer.phone,
-        default_address: node.customer.defaultAddress
+        phone: node.customer.phone
       } : null,
       billing_address: node.billingAddress,
       shipping_address: node.shippingAddress,
-      fulfillments: node.fulfillments || [],
       metafields,
       attributes: noteAttributes,
       line_items: lineItems,
