@@ -207,8 +207,6 @@ app.post("/metafields", async (req, res) => {
         console.error("🔴 Full response:", JSON.stringify(deleteRes.data, null, 2));
         return res.status(500).json({ error: "Metafield deletion failed - no deletedId returned" });
       }
-
-      return res.json({ success: true, deleted: true });
     } catch (err) {
       console.error("🔴 Metafield DELETE error:", err.response?.data || err.message);
       return res.status(500).json({ error: "Failed to delete metafield" });
