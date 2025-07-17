@@ -46,10 +46,10 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// CORS configuration with tighter policy
+// CORS configuration - Allow all Shopify domains
 const corsOptions = {
   origin: NODE_ENV === "production" 
-    ? [`https://${SHOPIFY_STORE_URL}`, /\.myshopify\.com$/] 
+    ? [/\.myshopify\.com$/, /localhost:\d+$/] 
     : true,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
