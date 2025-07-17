@@ -46,10 +46,16 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// CORS configuration - Allow all Shopify domains
+// CORS configuration - Allow Shopify and custom domains
 const corsOptions = {
   origin: NODE_ENV === "production" 
-    ? [/\.myshopify\.com$/, /localhost:\d+$/] 
+    ? [
+        /\.myshopify\.com$/, 
+        /localhost:\d+$/,
+        'https://www.exposurepack.com.au',
+        'https://exposurepack.com.au',
+        /\.exposurepack\.com\.au$/
+      ]
     : true,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
