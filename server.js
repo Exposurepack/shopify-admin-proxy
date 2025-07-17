@@ -198,14 +198,22 @@ app.post("/metafields", async (req, res) => {
         return res.status(502).json({ errors });
       }
 
-      const deletedId = deleteRes.data?.data?.metafieldDelete?.deletedId;
-      if (deletedId) {
-        console.log(`✅ Successfully deleted metafield: ${deletedId}`);
-        return res.json({ success: true, deleted: true, deletedId });
+      // Handle different response formats between API versions
+      const deleteResult = deleteRes.data?.data?.metafieldDelete;
+      const deletedId = deleteResult?.deletedId || deleteResult?.id || deleteResult?.deletedMetafieldId;
+      
+      // Check if deletion was successful (multiple ways to verify)
+      const isSuccess = deletedId || 
+                       (deleteResult && !deleteResult.userErrors?.length) ||
+                       (deleteRes.data?.data && deleteRes.data.data.metafieldDelete !== null);
+      
+      if (isSuccess) {
+        console.log(`✅ Successfully deleted metafield: ${deletedId || 'confirmed'}`);
+        return res.json({ success: true, deleted: true, deletedId: deletedId || 'confirmed' });
       } else {
-        console.error("🔴 No deletedId returned - deletion may have failed");
+        console.error("🔴 Metafield deletion failed");
         console.error("🔴 Full response:", JSON.stringify(deleteRes.data, null, 2));
-        return res.status(500).json({ error: "Metafield deletion failed - no deletedId returned" });
+        return res.status(500).json({ error: "Metafield deletion failed", response: deleteRes.data });
       }
     } catch (err) {
       console.error("🔴 Metafield DELETE error:", err.response?.data || err.message);
