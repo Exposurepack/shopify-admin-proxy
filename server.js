@@ -9,7 +9,7 @@ dotenv.config();
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
-  SHOPIFY_API_VERSION = "2024-04",
+  SHOPIFY_API_VERSION = "2025-07",
   FRONTEND_SECRET,
   PORT = 10000,
 } = process.env;
