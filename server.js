@@ -190,10 +190,22 @@ app.post("/metafields", async (req, res) => {
         }
       );
 
+      console.log("🔍 Delete response:", JSON.stringify(deleteRes.data, null, 2));
+
       const errors = deleteRes.data?.data?.metafieldDelete?.userErrors;
       if (errors?.length > 0) {
         console.error("🔴 Metafield delete error:", errors);
         return res.status(502).json({ errors });
+      }
+
+      const deletedId = deleteRes.data?.data?.metafieldDelete?.deletedId;
+      if (deletedId) {
+        console.log(`✅ Successfully deleted metafield: ${deletedId}`);
+        return res.json({ success: true, deleted: true, deletedId });
+      } else {
+        console.error("🔴 No deletedId returned - deletion may have failed");
+        console.error("🔴 Full response:", JSON.stringify(deleteRes.data, null, 2));
+        return res.status(500).json({ error: "Metafield deletion failed - no deletedId returned" });
       }
 
       return res.json({ success: true, deleted: true });
