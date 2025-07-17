@@ -169,9 +169,14 @@ app.post("/metafields", async (req, res) => {
 
       const deleteMutation = `
         mutation DeleteMetafield($id: ID!) {
-          metafieldDelete(input: { id: $id }) {
-            deletedId
-            userErrors { field message }
+          metafieldsDelete(metafields: [$id]) {
+            deletedMetafields {
+              id
+            }
+            userErrors { 
+              field 
+              message 
+            }
           }
         }
       `;
@@ -192,26 +197,23 @@ app.post("/metafields", async (req, res) => {
 
       console.log("🔍 Delete response:", JSON.stringify(deleteRes.data, null, 2));
 
-      const errors = deleteRes.data?.data?.metafieldDelete?.userErrors;
+      const deleteResult = deleteRes.data?.data?.metafieldsDelete;
+      const errors = deleteResult?.userErrors;
+      
       if (errors?.length > 0) {
         console.error("🔴 Metafield delete error:", errors);
         return res.status(502).json({ errors });
       }
 
-      // Handle different response formats between API versions
-      const deleteResult = deleteRes.data?.data?.metafieldDelete;
-      const deletedId = deleteResult?.deletedId || deleteResult?.id || deleteResult?.deletedMetafieldId;
+      // Check if deletion was successful with new 2025-07 format
+      const deletedMetafields = deleteResult?.deletedMetafields;
+      const deletedId = deletedMetafields?.[0]?.id;
       
-      // Check if deletion was successful (multiple ways to verify)
-      const isSuccess = deletedId || 
-                       (deleteResult && !deleteResult.userErrors?.length) ||
-                       (deleteRes.data?.data && deleteRes.data.data.metafieldDelete !== null);
-      
-      if (isSuccess) {
-        console.log(`✅ Successfully deleted metafield: ${deletedId || 'confirmed'}`);
-        return res.json({ success: true, deleted: true, deletedId: deletedId || 'confirmed' });
+      if (deletedMetafields?.length > 0 && deletedId) {
+        console.log(`✅ Successfully deleted metafield: ${deletedId}`);
+        return res.json({ success: true, deleted: true, deletedId });
       } else {
-        console.error("🔴 Metafield deletion failed");
+        console.error("🔴 Metafield deletion failed - no deleted metafields returned");
         console.error("🔴 Full response:", JSON.stringify(deleteRes.data, null, 2));
         return res.status(500).json({ error: "Metafield deletion failed", response: deleteRes.data });
       }
