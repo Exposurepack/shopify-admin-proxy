@@ -904,12 +904,32 @@ app.get("/orders", async (req, res) => {
       orders = data.data.orders.edges;
     }
 
-    // Transform the data
+    // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
+    console.log("📋 Fetching note_attributes for all orders...");
+    let restOrdersMap = {};
+    try {
+      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any`);
+      restOrdersRes.orders.forEach((order) => {
+        const noteAttributes = {};
+        order.note_attributes.forEach((na) => {
+          noteAttributes[na.name] = na.value;
+        });
+        restOrdersMap[order.id] = noteAttributes;
+      });
+      console.log(`✅ Fetched note_attributes for ${Object.keys(restOrdersMap).length} orders`);
+    } catch (restError) {
+      console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
+    }
+
+    // Transform the data with smart naming
     const transformedOrders = orders.map(({ node }) => {
       const metafields = {};
       node.metafields.edges.forEach((mf) => {
         metafields[mf.node.key] = mf.node.value;
       });
+
+      // Get note_attributes for this order
+      const noteAttributes = restOrdersMap[node.legacyResourceId] || {};
 
       const lineItems = node.lineItems.edges.map((item) => ({
         title: item.node.title,
@@ -925,6 +945,10 @@ app.get("/orders", async (req, res) => {
         original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
       }));
 
+      // Smart naming logic - prioritize attributes over default names
+      const businessName = noteAttributes.business_name || noteAttributes.company_name || node.shippingAddress?.company || node.customer?.displayName || 'Unknown';
+      const customerName = noteAttributes.customer_name || node.customer?.displayName || noteAttributes.business_name || 'Unknown Customer';
+      
       return {
         id: node.id,
         legacy_id: node.legacyResourceId,
@@ -945,6 +969,10 @@ app.get("/orders", async (req, res) => {
         } : null,
         shipping_address: node.shippingAddress,
         metafields,
+        attributes: noteAttributes,
+        // Smart display names (prioritizes custom attributes)
+        display_business_name: businessName,
+        display_customer_name: customerName,
         line_items: lineItems,
       };
     });
@@ -1119,9 +1147,14 @@ app.get("/orders/:id", async (req, res) => {
       restOrder.order.note_attributes.forEach((na) => {
         noteAttributes[na.name] = na.value;
       });
+      console.log(`✅ Fetched note_attributes for order ${legacyId}:`, Object.keys(noteAttributes));
     } catch (restError) {
       console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
     }
+
+    // Smart naming logic - prioritize attributes over default names
+    const businessName = noteAttributes.business_name || noteAttributes.company_name || node.shippingAddress?.company || node.customer?.displayName || 'Unknown';
+    const customerName = noteAttributes.customer_name || node.customer?.displayName || noteAttributes.business_name || 'Unknown Customer';
 
     const orderData = {
       id: node.id,
@@ -1147,6 +1180,9 @@ app.get("/orders/:id", async (req, res) => {
       shipping_address: node.shippingAddress,
       metafields,
       attributes: noteAttributes,
+      // Smart display names (prioritizes custom attributes)
+      display_business_name: businessName,
+      display_customer_name: customerName,
       line_items: lineItems,
     };
 
