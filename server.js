@@ -13,7 +13,7 @@ dotenv.config();
 const {
   SHOPIFY_STORE_URL,
   SHOPIFY_ACCESS_TOKEN,
-  SHOPIFY_API_VERSION = "2025-07",
+  SHOPIFY_API_VERSION = "2024-10",
   FRONTEND_SECRET,
   PORT = 10000,
   NODE_ENV = "development"
@@ -268,10 +268,8 @@ class MetafieldManager {
   async deleteMetafield(metafieldId) {
     const mutation = `
       mutation DeleteMetafield($id: ID!) {
-        metafieldsDelete(metafields: [$id]) {
-          deletedMetafields {
-            id
-          }
+        metafieldDelete(input: { id: $id }) {
+          deletedId
           userErrors { 
             field 
             message 
@@ -281,13 +279,13 @@ class MetafieldManager {
     `;
 
     const data = await this.client.query(mutation, { id: metafieldId });
-    const result = data.data.metafieldsDelete;
+    const result = data.data.metafieldDelete;
 
     if (result.userErrors?.length > 0) {
       throw new Error(`Metafield deletion failed: ${result.userErrors.map(e => e.message).join(', ')}`);
     }
 
-    return result.deletedMetafields?.[0];
+    return { id: result.deletedId };
   }
 
   async setMetafield(ownerId, namespace, key, value, type = "single_line_text_field") {
@@ -790,8 +788,8 @@ app.get("/orders", async (req, res) => {
     }
 
     const ordersQuery = `
-      query GetOrders($first: Int!, $after: String, ${statusFilter ? '$query: String!' : ''}) {
-        orders(first: $first, ${after ? 'after: $after,' : ''} ${statusFilter ? 'query: $query,' : ''} sortKey: CREATED_AT, reverse: true) {
+      query GetOrders($first: Int!${after ? ', $after: String' : ''}${statusFilter ? ', $query: String!' : ''}) {
+        orders(first: $first${after ? ', after: $after' : ''}${statusFilter ? ', query: $query' : ''}, sortKey: CREATED_AT, reverse: true) {
           edges {
             node {
               id
