@@ -1406,6 +1406,70 @@ app.post("/metafields", async (req, res) => {
 });
 
 /**
+ * Fulfillment endpoint - Creates Shopify fulfillments with tracking info
+ */
+app.post("/fulfillments", authenticate, async (req, res) => {
+  try {
+    const { orderId, fulfillmentData } = req.body;
+
+    if (!orderId || !fulfillmentData) {
+      return res.status(400).json({
+        error: "Missing required data",
+        message: "orderId and fulfillmentData are required"
+      });
+    }
+
+    console.log(`📦 Creating fulfillment for order: ${orderId}`);
+    console.log(`📋 Fulfillment data:`, JSON.stringify(fulfillmentData, null, 2));
+
+    // Validate orderId format
+    if (!orderId.startsWith('gid://shopify/Order/')) {
+      return res.status(400).json({
+        error: "Invalid orderId format",
+        message: "orderId must be in format: gid://shopify/Order/ORDER_ID"
+      });
+    }
+
+    // Extract numeric order ID for REST API
+    const numericOrderId = orderId.replace('gid://shopify/Order/', '');
+
+    // Create fulfillment using Shopify REST API
+    const fulfillmentResponse = await restClient.post(
+      `/orders/${numericOrderId}/fulfillments.json`,
+      fulfillmentData
+    );
+
+    console.log(`✅ Fulfillment created successfully:`, fulfillmentResponse);
+
+    res.json({
+      success: true,
+      fulfillment: fulfillmentResponse,
+      message: "Fulfillment created successfully",
+      trackingNumber: fulfillmentData.fulfillment?.tracking_number,
+      trackingCompany: fulfillmentData.fulfillment?.tracking_company
+    });
+
+  } catch (error) {
+    console.error("❌ Error creating fulfillment:", error);
+    
+    if (error.response?.body) {
+      console.error("❌ Shopify API Error Details:", error.response.body);
+      
+      return res.status(error.response.statusCode || 500).json({
+        error: "Shopify API Error",
+        message: error.response.body.errors || error.message,
+        details: error.response.body
+      });
+    }
+
+    res.status(500).json({
+      error: "Internal Server Error",
+      message: error.message
+    });
+  }
+});
+
+/**
  * File upload endpoint with improved error handling and progress tracking
  */
 app.post("/upload-file", upload.single('file'), async (req, res) => {
@@ -2142,6 +2206,7 @@ app.use('*', (req, res) => {
       "GET /rest/locations",
       "GET /metafields",
       "POST /metafields",
+      "POST /fulfillments",
       "POST /upload-file",
       "POST /webhook",
       "POST /shopify-webhook"
@@ -2167,7 +2232,9 @@ app.listen(PORT, () => {
   console.log("   🏢 GET  /rest/locations    - Store locations");
   console.log("   📝 GET  /metafields        - Metafields help");
   console.log("   💾 POST /metafields        - Manage metafields");
+  console.log("   📦 POST /fulfillments      - Create order fulfillments");
   console.log("   📤 POST /upload-file       - File uploads");
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
+  console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
   console.log("✅ ===============================================");
 }); 
