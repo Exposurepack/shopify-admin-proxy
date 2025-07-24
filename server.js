@@ -104,8 +104,8 @@ const upload = multer({
 
 // Authentication middleware
 const authenticate = (req, res, next) => {
-  // Bypass authentication for webhook endpoints
-  if (req.path === '/webhook' || req.path === '/shopify-webhook') {
+  // Bypass authentication for webhook endpoints and test endpoints
+  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test') {
     return next();
   }
   
@@ -1421,10 +1421,16 @@ app.get("/fulfillments/test", (req, res) => {
  * Fulfillment endpoint - Creates Shopify fulfillments with tracking info
  */
 app.post("/fulfillments", authenticate, async (req, res) => {
+  // Ensure JSON response
+  res.setHeader('Content-Type', 'application/json');
+  
   try {
-    console.log("📦 Fulfillment endpoint hit");
+    console.log("📦 ===============================================");
+    console.log("📦 FULFILLMENT ENDPOINT HIT");
+    console.log("📦 ===============================================");
     console.log("📋 Request headers:", req.headers);
     console.log("📋 Request body:", req.body);
+    console.log("📦 ===============================================");
 
     const { orderId, fulfillmentData } = req.body;
 
@@ -2257,6 +2263,7 @@ app.listen(PORT, () => {
   console.log("   📝 GET  /metafields        - Metafields help");
   console.log("   💾 POST /metafields        - Manage metafields");
   console.log("   📦 POST /fulfillments      - Create order fulfillments");
+  console.log("   🧪 GET  /fulfillments/test - Test fulfillment endpoint");
   console.log("   📤 POST /upload-file       - File uploads");
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
