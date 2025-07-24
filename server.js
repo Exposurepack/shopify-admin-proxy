@@ -559,7 +559,7 @@ class HubSpotClient {
       // Get the most recent invoice (or first one)
       const invoiceId = response.data.results[0].id;
       
-      // Fetch detailed invoice data including line items
+      // Fetch detailed invoice data including line items and tax
       const invoiceResponse = await axios.get(
         `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
         {
@@ -569,6 +569,9 @@ class HubSpotClient {
               'hs_invoice_number',
               'hs_invoice_status',
               'hs_total_amount',
+              'hs_subtotal_amount',
+              'hs_tax_amount',
+              'hs_discount_amount',
               'hs_currency',
               'hs_invoice_date'
             ].join(','),
@@ -618,12 +621,26 @@ class HubSpotClient {
       const lineItems = await Promise.all(lineItemPromises);
       
       console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number} with ${lineItems.length} line items`);
-      return lineItems;
+      console.log(`💰 Invoice totals - Subtotal: $${invoice.properties.hs_subtotal_amount || 'N/A'}, Tax: $${invoice.properties.hs_tax_amount || 'N/A'}, Total: $${invoice.properties.hs_total_amount || 'N/A'}`);
+      
+      // Return both line items and invoice totals
+      return {
+        lineItems: lineItems,
+        invoice: {
+          number: invoice.properties.hs_invoice_number,
+          subtotal: parseFloat(invoice.properties.hs_subtotal_amount) || 0,
+          tax: parseFloat(invoice.properties.hs_tax_amount) || 0,
+          discount: parseFloat(invoice.properties.hs_discount_amount) || 0,
+          total: parseFloat(invoice.properties.hs_total_amount) || 0,
+          currency: invoice.properties.hs_currency || 'USD'
+        }
+      };
 
     } catch (error) {
       console.warn(`⚠️ Failed to fetch invoice line items for deal ${dealId}:`, error.response?.data?.message || error.message);
       // Fallback to deal line items if invoice approach fails
-      return this.getDealLineItems(dealId);
+      const fallbackItems = await this.getDealLineItems(dealId);
+      return Array.isArray(fallbackItems) ? fallbackItems : [];
     }
   }
 
@@ -766,11 +783,28 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Fetch deal details from HubSpot
     const deal = await hubspotClient.getDeal(dealId);
     const contacts = await hubspotClient.getAssociatedContacts(dealId);
-    const invoiceLineItems = await hubspotClient.getDealInvoices(dealId);
+    const invoiceData = await hubspotClient.getDealInvoices(dealId);
 
     console.log(`📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
     console.log(`👥 Associated contacts: ${contacts.length}`);
-    console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
+    
+    // Handle both old format (array) and new format (object with lineItems and invoice)
+    let invoiceLineItems = [];
+    let invoiceInfo = null;
+    
+    if (Array.isArray(invoiceData)) {
+      // Old format - just line items
+      invoiceLineItems = invoiceData;
+      console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
+    } else if (invoiceData && invoiceData.lineItems) {
+      // New format - line items with invoice totals
+      invoiceLineItems = invoiceData.lineItems;
+      invoiceInfo = invoiceData.invoice;
+      console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
+      console.log(`💰 Invoice info: ${invoiceInfo.number} - Subtotal: $${invoiceInfo.subtotal}, Tax: $${invoiceInfo.tax}, Total: $${invoiceInfo.total}`);
+    } else {
+      console.log(`🧾 No invoice data found`);
+    }
 
     // Get primary contact (first one)
     const primaryContact = contacts[0];
@@ -840,16 +874,33 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         shipping_address: address,
         financial_status: 'paid', // Mark as paid by default as requested
         tags: ['hubspot-import', `hubspot-deal-${dealId}`],
-        note: `Imported from HubSpot Deal: ${deal.properties.dealname || dealId}\nDeal ID: ${dealId}\nOriginal Amount: $${deal.properties.amount || '0'}`,
+        note: `Imported from HubSpot Deal: ${deal.properties.dealname || dealId}\nDeal ID: ${dealId}\nOriginal Amount: $${deal.properties.amount || '0'}${invoiceInfo ? `\nInvoice: ${invoiceInfo.number}` : ''}`,
         note_attributes: [
           { name: 'hubspot_deal_id', value: dealId },
           { name: 'hubspot_deal_name', value: deal.properties.dealname || '' },
           { name: 'import_source', value: 'hubspot_webhook' },
-          { name: 'import_date', value: new Date().toISOString() }
+          { name: 'import_date', value: new Date().toISOString() },
+          ...(invoiceInfo ? [{ name: 'hubspot_invoice_number', value: invoiceInfo.number }] : [])
         ],
         send_receipt: false, // Don't send automatic receipt
         send_fulfillment_receipt: false,
-        inventory_behaviour: 'decrement_obeying_policy'
+        inventory_behaviour: 'decrement_obeying_policy',
+        // Add tax lines if we have invoice tax information
+        ...(invoiceInfo && invoiceInfo.tax > 0 ? {
+          tax_lines: [{
+            title: 'Tax',
+            price: invoiceInfo.tax.toFixed(2),
+            rate: 0.10 // Default 10% rate - adjust as needed
+          }]
+        } : {}),
+        // Add discount lines if we have invoice discount information
+        ...(invoiceInfo && invoiceInfo.discount > 0 ? {
+          discount_codes: [{
+            code: 'HUBSPOT_DISCOUNT',
+            amount: invoiceInfo.discount.toFixed(2),
+            type: 'fixed_amount'
+          }]
+        } : {})
       }
     };
 
