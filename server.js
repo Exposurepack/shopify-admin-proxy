@@ -1410,9 +1410,14 @@ app.post("/metafields", async (req, res) => {
  */
 app.post("/fulfillments", authenticate, async (req, res) => {
   try {
+    console.log("📦 Fulfillment endpoint hit");
+    console.log("📋 Request headers:", req.headers);
+    console.log("📋 Request body:", req.body);
+
     const { orderId, fulfillmentData } = req.body;
 
     if (!orderId || !fulfillmentData) {
+      console.log("❌ Missing required data - orderId or fulfillmentData");
       return res.status(400).json({
         error: "Missing required data",
         message: "orderId and fulfillmentData are required"
