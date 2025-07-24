@@ -1507,6 +1507,48 @@ app.post("/fulfillments", authenticate, async (req, res) => {
 
     // Extract numeric order ID for REST API
     const numericOrderId = orderId.replace('gid://shopify/Order/', '');
+    
+    // First, fetch the order to check its status
+    console.log(`🔍 Fetching order details first to check fulfillability...`);
+    try {
+      const orderResponse = await restClient.get(`/orders/${numericOrderId}.json`);
+      const order = orderResponse.order;
+      
+      console.log(`📋 Order Status Check:`);
+      console.log(`   💰 Financial Status: ${order.financial_status}`);
+      console.log(`   📦 Fulfillment Status: ${order.fulfillment_status}`);
+      console.log(`   🏷️ Tags: ${order.tags}`);
+      console.log(`   📅 Created: ${order.created_at}`);
+      console.log(`   📝 Line Items: ${order.line_items?.length || 0}`);
+      
+      // Check if order is fulfillable
+      if (order.financial_status?.toLowerCase() !== 'paid') {
+        return res.status(400).json({
+          error: "Order not fulfillable",
+          message: `Order must be paid before fulfillment. Current status: ${order.financial_status}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      if (order.fulfillment_status?.toLowerCase() === 'fulfilled') {
+        return res.status(400).json({
+          error: "Order not fulfillable", 
+          message: "Order is already fully fulfilled",
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      console.log(`✅ Order appears fulfillable, proceeding with fulfillment creation...`);
+      
+    } catch (orderFetchError) {
+      console.error(`⚠️ Could not fetch order details for pre-check:`, orderFetchError.message);
+      console.log(`🔄 Proceeding with fulfillment anyway...`);
+    }
+
+    console.log(`🔍 Making Shopify REST API call:`);
+    console.log(`📍 URL: /orders/${numericOrderId}/fulfillments.json`);
+    console.log(`🔐 Using API version: ${SHOPIFY_API_VERSION}`);
+    console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
 
     // Create fulfillment using Shopify REST API
     const fulfillmentResponse = await restClient.post(
@@ -1531,13 +1573,28 @@ app.post("/fulfillments", authenticate, async (req, res) => {
     // Ensure we always return JSON, never HTML
     res.setHeader('Content-Type', 'application/json');
     
-    if (error.response?.body) {
-      console.error("❌ Shopify API Error Details:", error.response.body);
+    if (error.response) {
+      console.error("❌ Shopify API Error Response:");
+      console.error("📊 Status:", error.response.status || error.response.statusCode);
+      console.error("📋 Headers:", error.response.headers);
+      console.error("📄 Body:", error.response.body || error.response.data);
+      console.error("🔍 Full Response:", JSON.stringify(error.response, null, 2));
       
-      return res.status(error.response.statusCode || 500).json({
+      // Special handling for 406 errors
+      if (error.response.status === 406 || error.response.statusCode === 406) {
+        console.error("🚨 406 NOT ACCEPTABLE - Common causes:");
+        console.error("   - Order not fulfillable (already fulfilled, cancelled, etc.)");
+        console.error("   - Line items already fulfilled or invalid");
+        console.error("   - Inventory tracking issues");
+        console.error("   - API version compatibility");
+        console.error("   - Missing required fields");
+      }
+      
+      return res.status(error.response.statusCode || error.response.status || 500).json({
         error: "Shopify API Error",
-        message: error.response.body.errors || error.message,
-        details: error.response.body,
+        message: error.response.body?.errors || error.response.data?.errors || error.message,
+        details: error.response.body || error.response.data,
+        shopifyStatus: error.response.status || error.response.statusCode,
         timestamp: new Date().toISOString()
       });
     }
