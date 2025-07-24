@@ -565,21 +565,14 @@ class HubSpotClient {
       console.log(`📄 Processing invoice ID: ${invoiceId}`);
       
       // Fetch detailed invoice data including line items and tax
+      // First, try with all properties to see what's available
       const invoiceResponse = await axios.get(
         `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
         {
           headers: this.headers,
           params: {
-            properties: [
-              'hs_invoice_number',
-              'hs_invoice_status',
-              'hs_total_amount',
-              'hs_subtotal_amount',
-              'hs_tax_amount',
-              'hs_discount_amount',
-              'hs_currency',
-              'hs_invoice_date'
-            ].join(','),
+            // Request all properties to see what's available
+            properties: 'all',
             associations: 'line_items'
           }
         }
@@ -627,7 +620,7 @@ class HubSpotClient {
 
       const lineItems = await Promise.all(lineItemPromises);
       
-      console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number} with ${lineItems.length} line items`);
+      console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number || invoiceId} with ${lineItems.length} line items`);
       console.log(`💰 Invoice totals - Subtotal: $${invoice.properties.hs_subtotal_amount || 'N/A'}, Tax: $${invoice.properties.hs_tax_amount || 'N/A'}, Total: $${invoice.properties.hs_total_amount || 'N/A'}`);
       console.log(`🔍 All invoice properties:`, Object.keys(invoice.properties || {}));
       console.log(`🔍 Tax-related properties:`, {
@@ -636,16 +629,43 @@ class HubSpotClient {
         hs_total_amount: invoice.properties.hs_total_amount
       });
       
+      // Calculate totals from line items if not available on invoice
+      let calculatedSubtotal = 0;
+      let calculatedTax = 0;
+      let calculatedTotal = 0;
+      
+      if (lineItems && lineItems.length > 0) {
+        lineItems.forEach(item => {
+          const props = item.properties;
+          const amount = parseFloat(props.amount) || 0;
+          calculatedSubtotal += amount;
+        });
+        
+        // Assume 10% GST if we have subtotal but no tax info
+        if (calculatedSubtotal > 0 && !invoice.properties.hs_tax_amount) {
+          calculatedTax = calculatedSubtotal * 0.10;
+        }
+        
+        calculatedTotal = calculatedSubtotal + calculatedTax;
+      }
+      
+      console.log(`🧮 Calculated totals - Subtotal: $${calculatedSubtotal}, Tax: $${calculatedTax}, Total: $${calculatedTotal}`);
+      
+      // Use calculated values if invoice properties are missing
+      const subtotal = parseFloat(invoice.properties.hs_subtotal_amount) || calculatedSubtotal;
+      const tax = parseFloat(invoice.properties.hs_tax_amount) || calculatedTax;
+      const total = parseFloat(invoice.properties.hs_total_amount) || calculatedTotal;
+      
       // Return both line items and invoice totals
       return {
         lineItems: lineItems,
         invoice: {
-          number: invoice.properties.hs_invoice_number,
-          subtotal: parseFloat(invoice.properties.hs_subtotal_amount) || 0,
-          tax: parseFloat(invoice.properties.hs_tax_amount) || 0,
+          number: invoice.properties.hs_invoice_number || `INV-${invoiceId}`,
+          subtotal: subtotal,
+          tax: tax,
           discount: parseFloat(invoice.properties.hs_discount_amount) || 0,
-          total: parseFloat(invoice.properties.hs_total_amount) || 0,
-          currency: invoice.properties.hs_currency || 'USD'
+          total: total,
+          currency: invoice.properties.hs_currency || 'AUD'
         }
       };
 
@@ -796,6 +816,24 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Fetch deal details from HubSpot
     const deal = await hubspotClient.getDeal(dealId);
     const contacts = await hubspotClient.getAssociatedContacts(dealId);
+    
+    // Debug: Check all associations for this deal
+    try {
+      const allAssociationsResponse = await axios.get(
+        `https://api.hubapi.com/crm/v3/objects/deals/${dealId}`,
+        {
+          headers: { 'Authorization': `Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}` },
+          params: {
+            associations: ['contacts', 'line_items', 'invoices', 'quotes'],
+            properties: 'dealname,amount'
+          }
+        }
+      );
+      console.log(`🔗 All deal associations:`, JSON.stringify(allAssociationsResponse.data.associations || {}, null, 2));
+    } catch (error) {
+      console.log(`⚠️ Could not fetch deal associations:`, error.response?.data?.message || error.message);
+    }
+    
     const invoiceData = await hubspotClient.getDealInvoices(dealId);
 
     console.log(`📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
