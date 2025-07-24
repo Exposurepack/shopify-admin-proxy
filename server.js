@@ -15,6 +15,7 @@ const {
   SHOPIFY_ACCESS_TOKEN,
   SHOPIFY_API_VERSION = "2024-10",
   FRONTEND_SECRET,
+  HUBSPOT_PRIVATE_APP_TOKEN,
   PORT = 10000,
   NODE_ENV = "development"
 } = process.env;
@@ -25,6 +26,10 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   console.error("   - SHOPIFY_ACCESS_TOKEN"); 
   console.error("   - FRONTEND_SECRET");
   process.exit(1);
+}
+
+if (!HUBSPOT_PRIVATE_APP_TOKEN) {
+  console.warn("⚠️ HUBSPOT_PRIVATE_APP_TOKEN not set - HubSpot webhook functionality will be disabled");
 }
 
 // Security and performance configuration
@@ -99,6 +104,11 @@ const upload = multer({
 
 // Authentication middleware
 const authenticate = (req, res, next) => {
+  // Bypass authentication for webhook endpoints
+  if (req.path === '/webhook') {
+    return next();
+  }
+  
   const apiKey = req.headers["x-api-key"];
   if (!apiKey || apiKey !== FRONTEND_SECRET) {
     return res.status(401).json({ 
@@ -456,6 +466,151 @@ class FileUploadManager {
 }
 
 /**
+ * HubSpot API client for deal and contact management
+ */
+class HubSpotClient {
+  constructor() {
+    if (!HUBSPOT_PRIVATE_APP_TOKEN) {
+      throw new Error("HubSpot private app token is required");
+    }
+    
+    this.baseURL = "https://api.hubapi.com";
+    this.headers = {
+      "Authorization": `Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}`,
+      "Content-Type": "application/json"
+    };
+  }
+
+  async getDeal(dealId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}`,
+        {
+          headers: this.headers,
+          params: {
+            properties: [
+              'dealname',
+              'amount',
+              'dealstage',
+              'closedate',
+              'hs_object_id',
+              'notes_last_contacted',
+              'description',
+              'deal_currency_code',
+              'hs_deal_stage_probability',
+              'hubspot_owner_id'
+            ].join(','),
+            associations: 'contacts,line_items'
+          },
+          timeout: 30000
+        }
+      );
+      return response.data;
+    } catch (error) {
+      throw new Error(`Failed to fetch HubSpot deal ${dealId}: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  async getContact(contactId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/contacts/${contactId}`,
+        {
+          headers: this.headers,
+          params: {
+            properties: [
+              'firstname',
+              'lastname',
+              'email',
+              'phone',
+              'company',
+              'address',
+              'city',
+              'state',
+              'zip',
+              'country'
+            ].join(',')
+          },
+          timeout: 30000
+        }
+      );
+      return response.data;
+    } catch (error) {
+      throw new Error(`Failed to fetch HubSpot contact ${contactId}: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  async getDealLineItems(dealId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/line_items`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+      
+      if (!response.data.results || response.data.results.length === 0) {
+        return [];
+      }
+
+      // Fetch detailed line item data
+      const lineItemPromises = response.data.results.map(async (association) => {
+        const lineItemResponse = await axios.get(
+          `${this.baseURL}/crm/v3/objects/line_items/${association.id}`,
+          {
+            headers: this.headers,
+            params: {
+              properties: [
+                'name',
+                'quantity',
+                'price',
+                'amount',
+                'hs_product_id',
+                'description',
+                'hs_sku'
+              ].join(',')
+            }
+          }
+        );
+        return lineItemResponse.data;
+      });
+
+      return await Promise.all(lineItemPromises);
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch line items for deal ${dealId}:`, error.response?.data?.message || error.message);
+      return [];
+    }
+  }
+
+  async getAssociatedContacts(dealId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/contacts`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+      
+      if (!response.data.results || response.data.results.length === 0) {
+        return [];
+      }
+
+      // Fetch detailed contact data for all associated contacts
+      const contactPromises = response.data.results.map(association => 
+        this.getContact(association.id)
+      );
+
+      return await Promise.all(contactPromises);
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch associated contacts for deal ${dealId}:`, error.response?.data?.message || error.message);
+      return [];
+    }
+  }
+}
+
+/**
  * Error handling utilities
  */
 const handleError = (error, res, defaultMessage = "An error occurred") => {
@@ -510,6 +665,160 @@ const validateOrderGID = (orderGID) => {
   return true;
 };
 
+/**
+ * Creates a Shopify order from HubSpot deal data
+ */
+async function createShopifyOrderFromHubspotInvoice(dealId) {
+  if (!HUBSPOT_PRIVATE_APP_TOKEN) {
+    throw new Error("HubSpot integration not configured - missing HUBSPOT_PRIVATE_APP_TOKEN");
+  }
+
+  console.log(`🔄 Creating Shopify order from HubSpot deal: ${dealId}`);
+
+  try {
+    // Fetch deal details from HubSpot
+    const deal = await hubspotClient.getDeal(dealId);
+    const contacts = await hubspotClient.getAssociatedContacts(dealId);
+    const lineItems = await hubspotClient.getDealLineItems(dealId);
+
+    console.log(`📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
+    console.log(`👥 Associated contacts: ${contacts.length}`);
+    console.log(`📦 Line items: ${lineItems.length}`);
+
+    // Get primary contact (first one)
+    const primaryContact = contacts[0];
+    if (!primaryContact) {
+      throw new Error("No associated contact found for deal");
+    }
+
+    const contactProps = primaryContact.properties;
+    console.log(`👤 Primary contact: ${contactProps.email || 'No email'}`);
+
+    // Transform line items for Shopify
+    const shopifyLineItems = lineItems.map(item => {
+      const props = item.properties;
+      return {
+        title: props.name || 'HubSpot Deal Item',
+        quantity: parseInt(props.quantity) || 1,
+        price: parseFloat(props.price) || parseFloat(props.amount) || '0.00',
+        sku: props.hs_sku || `HUBSPOT-${item.id}`,
+        vendor: 'HubSpot Import',
+        requires_shipping: true,
+        taxable: true,
+        fulfillment_service: 'manual'
+      };
+    });
+
+    // If no line items, create a placeholder item
+    if (shopifyLineItems.length === 0) {
+      shopifyLineItems.push({
+        title: deal.properties.dealname || 'HubSpot Deal',
+        quantity: 1,
+        price: parseFloat(deal.properties.amount) || '0.00',
+        sku: `DEAL-${dealId}`,
+        vendor: 'HubSpot Import',
+        requires_shipping: true,
+        taxable: true,
+        fulfillment_service: 'manual'
+      });
+    }
+
+    // Build customer data
+    const customer = {
+      first_name: contactProps.firstname || '',
+      last_name: contactProps.lastname || '',
+      email: contactProps.email || `hubspot-${dealId}@placeholder.com`,
+      phone: contactProps.phone || null
+    };
+
+    // Build address (use contact address or company address)
+    const address = {
+      first_name: contactProps.firstname || '',
+      last_name: contactProps.lastname || '',
+      company: contactProps.company || '',
+      address1: contactProps.address || '',
+      city: contactProps.city || '',
+      province: contactProps.state || '',
+      country: contactProps.country || 'Australia', // Default for AU business
+      zip: contactProps.zip || '',
+      phone: contactProps.phone || null
+    };
+
+    // Create order via Shopify REST API
+    const orderData = {
+      order: {
+        line_items: shopifyLineItems,
+        customer: customer,
+        billing_address: address,
+        shipping_address: address,
+        financial_status: 'paid', // Mark as paid by default as requested
+        tags: ['hubspot-import', `hubspot-deal-${dealId}`],
+        note: `Imported from HubSpot Deal: ${deal.properties.dealname || dealId}\nDeal ID: ${dealId}\nOriginal Amount: $${deal.properties.amount || '0'}`,
+        note_attributes: [
+          { name: 'hubspot_deal_id', value: dealId },
+          { name: 'hubspot_deal_name', value: deal.properties.dealname || '' },
+          { name: 'import_source', value: 'hubspot_webhook' },
+          { name: 'import_date', value: new Date().toISOString() }
+        ],
+        send_receipt: false, // Don't send automatic receipt
+        send_fulfillment_receipt: false,
+        inventory_behaviour: 'decrement_obeying_policy'
+      }
+    };
+
+    console.log(`🛒 Creating Shopify order with ${shopifyLineItems.length} line items`);
+
+    // Create the order using REST API
+    const response = await restClient.post('/orders.json', orderData);
+    const createdOrder = response.order;
+
+    console.log(`✅ Successfully created Shopify order: ${createdOrder.name} (ID: ${createdOrder.id})`);
+
+    // Add additional metafields for tracking
+    const orderGID = `gid://shopify/Order/${createdOrder.id}`;
+    await metafieldManager.setMetafield(
+      orderGID,
+      'hubspot',
+      'deal_id',
+      dealId,
+      'single_line_text_field'
+    );
+
+    await metafieldManager.setMetafield(
+      orderGID,
+      'hubspot',
+      'deal_name',
+      deal.properties.dealname || '',
+      'single_line_text_field'
+    );
+
+    await metafieldManager.setMetafield(
+      orderGID,
+      'hubspot',
+      'original_amount',
+      deal.properties.amount || '0',
+      'number_decimal'
+    );
+
+    console.log(`📝 Added HubSpot tracking metafields to order ${createdOrder.name}`);
+
+    return {
+      success: true,
+      order: {
+        id: createdOrder.id,
+        name: createdOrder.name,
+        total_price: createdOrder.total_price,
+        financial_status: createdOrder.financial_status,
+        hubspot_deal_id: dealId
+      }
+    };
+
+  } catch (error) {
+    console.error(`❌ Failed to create Shopify order from HubSpot deal ${dealId}:`, error.message);
+    throw error;
+  }
+}
+
 // ===========================================
 // INITIALIZE CLIENTS
 // ===========================================
@@ -518,6 +827,19 @@ const graphqlClient = new ShopifyGraphQLClient();
 const restClient = new ShopifyRESTClient();
 const metafieldManager = new MetafieldManager(graphqlClient);
 const fileUploadManager = new FileUploadManager(graphqlClient);
+
+// Initialize HubSpot client only if token is available
+let hubspotClient = null;
+if (HUBSPOT_PRIVATE_APP_TOKEN) {
+  try {
+    hubspotClient = new HubSpotClient();
+    console.log("✅ HubSpot client initialized successfully");
+  } catch (error) {
+    console.error("❌ Failed to initialize HubSpot client:", error.message);
+  }
+} else {
+  console.log("ℹ️ HubSpot client not initialized - token not provided");
+}
 
 // ===========================================
 // API ENDPOINTS
@@ -568,11 +890,16 @@ app.get("/meta", async (req, res) => {
           endpoint: `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}`
         }
       },
+      hubspot: {
+        enabled: !!hubspotClient,
+        webhookEndpoint: "/webhook"
+      },
       endpoints: {
         graphql: ["/orders", "/orders/:id"],
         rest: ["/rest/orders/:id", "/rest/locations"],
         metafields: ["/metafields"],
         files: ["/upload-file"],
+        webhooks: ["/webhook"],
         meta: ["/meta"]
       }
     });
@@ -1219,6 +1546,100 @@ app.get("/rest/locations", async (req, res) => {
   }
 });
 
+/**
+ * HubSpot webhook endpoint for deal stage changes
+ * Bypasses authentication for webhook calls
+ */
+app.post("/webhook", express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    console.log("🎯 HubSpot webhook received");
+
+    if (!hubspotClient) {
+      console.warn("⚠️ HubSpot webhook received but client not configured");
+      return res.status(200).json({ 
+        received: true, 
+        processed: false, 
+        message: "HubSpot integration not configured" 
+      });
+    }
+
+    // Parse the webhook payload
+    let payload;
+    try {
+      payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (parseError) {
+      console.error("❌ Failed to parse webhook payload:", parseError.message);
+      return res.status(200).json({ received: true, processed: false, message: "Invalid JSON payload" });
+    }
+
+    console.log("📋 Webhook payload received:", JSON.stringify(payload, null, 2));
+
+    // Extract data from the first item in the payload array
+    if (!Array.isArray(payload) || payload.length === 0) {
+      console.warn("⚠️ Webhook payload is not an array or is empty");
+      return res.status(200).json({ received: true, processed: false, message: "Empty or invalid payload format" });
+    }
+
+    const firstItem = payload[0];
+    const { objectId, propertyName, newValue } = firstItem;
+
+    console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, newValue=${newValue}`);
+
+    // Check if this is a dealstage change to closedwon
+    if (propertyName === 'dealstage' && newValue === 'closedwon') {
+      console.log(`🎉 Deal ${objectId} moved to 'closedwon' - creating Shopify order`);
+
+      try {
+        const result = await createShopifyOrderFromHubspotInvoice(objectId);
+        
+        console.log(`✅ Successfully created Shopify order from HubSpot deal ${objectId}`);
+        
+        return res.status(200).json({
+          received: true,
+          processed: true,
+          message: "Shopify order created successfully",
+          dealId: objectId,
+          shopifyOrder: result.order
+        });
+
+      } catch (orderError) {
+        console.error(`❌ Failed to create Shopify order from deal ${objectId}:`, orderError.message);
+        
+        // Still return 200 to prevent HubSpot retries, but log the error
+        return res.status(200).json({
+          received: true,
+          processed: false,
+          message: "Failed to create Shopify order",
+          error: orderError.message,
+          dealId: objectId
+        });
+      }
+
+    } else {
+      console.log(`ℹ️ Webhook ignored - not a dealstage change to closedwon (propertyName: ${propertyName}, newValue: ${newValue})`);
+      
+      return res.status(200).json({
+        received: true,
+        processed: false,
+        message: `Webhook ignored - not a dealstage change to closedwon`,
+        propertyName,
+        newValue
+      });
+    }
+
+  } catch (error) {
+    console.error("❌ Webhook processing error:", error);
+    
+    // Always return 200 for webhooks to prevent retries
+    return res.status(200).json({
+      received: true,
+      processed: false,
+      message: "Webhook processing failed",
+      error: error.message
+    });
+  }
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
@@ -1246,7 +1667,8 @@ app.use('*', (req, res) => {
       "GET /rest/locations",
       "GET /metafields",
       "POST /metafields",
-      "POST /upload-file"
+      "POST /upload-file",
+      "POST /webhook"
     ]
   });
 });
@@ -1259,6 +1681,7 @@ app.listen(PORT, () => {
   console.log(`✅ Store: ${SHOPIFY_STORE_URL}`);
   console.log(`✅ API Version: ${SHOPIFY_API_VERSION}`);
   console.log(`✅ Environment: ${NODE_ENV}`);
+  console.log(`✅ HubSpot Integration: ${hubspotClient ? 'Enabled' : 'Disabled'}`);
   console.log("✅ ===============================================");
   console.log("🔗 Available endpoints:");
   console.log("   📊 GET  /meta              - Server & store info");
@@ -1269,5 +1692,6 @@ app.listen(PORT, () => {
   console.log("   📝 GET  /metafields        - Metafields help");
   console.log("   💾 POST /metafields        - Manage metafields");
   console.log("   📤 POST /upload-file       - File uploads");
+  console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("✅ ===============================================");
 }); 
