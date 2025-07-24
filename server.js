@@ -540,6 +540,93 @@ class HubSpotClient {
     }
   }
 
+  async getDealInvoices(dealId) {
+    try {
+      // First, get invoices associated with the deal
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/invoices`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+      
+      if (!response.data.results || response.data.results.length === 0) {
+        console.log(`ℹ️ No invoices found for deal ${dealId}`);
+        return [];
+      }
+
+      // Get the most recent invoice (or first one)
+      const invoiceId = response.data.results[0].id;
+      
+      // Fetch detailed invoice data including line items
+      const invoiceResponse = await axios.get(
+        `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
+        {
+          headers: this.headers,
+          params: {
+            properties: [
+              'hs_invoice_number',
+              'hs_invoice_status',
+              'hs_total_amount',
+              'hs_currency',
+              'hs_invoice_date'
+            ].join(','),
+            associations: 'line_items'
+          }
+        }
+      );
+
+      const invoice = invoiceResponse.data;
+      
+      // Get invoice line items
+      const lineItemsResponse = await axios.get(
+        `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}/associations/line_items`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+
+      if (!lineItemsResponse.data.results || lineItemsResponse.data.results.length === 0) {
+        console.log(`ℹ️ No line items found for invoice ${invoiceId}`);
+        return [];
+      }
+
+      // Fetch detailed line item data
+      const lineItemPromises = lineItemsResponse.data.results.map(async (association) => {
+        const lineItemResponse = await axios.get(
+          `${this.baseURL}/crm/v3/objects/line_items/${association.id}`,
+          {
+            headers: this.headers,
+            params: {
+              properties: [
+                'name',
+                'quantity',
+                'price',
+                'amount',
+                'hs_product_id',
+                'description',
+                'hs_sku'
+              ].join(',')
+            }
+          }
+        );
+        return lineItemResponse.data;
+      });
+
+      const lineItems = await Promise.all(lineItemPromises);
+      
+      console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number} with ${lineItems.length} line items`);
+      return lineItems;
+
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch invoice line items for deal ${dealId}:`, error.response?.data?.message || error.message);
+      // Fallback to deal line items if invoice approach fails
+      return this.getDealLineItems(dealId);
+    }
+  }
+
   async getDealLineItems(dealId) {
     try {
       const response = await axios.get(
@@ -578,7 +665,7 @@ class HubSpotClient {
 
       return await Promise.all(lineItemPromises);
     } catch (error) {
-      console.warn(`⚠️ Failed to fetch line items for deal ${dealId}:`, error.response?.data?.message || error.message);
+      console.warn(`⚠️ Failed to fetch deal line items for deal ${dealId}:`, error.response?.data?.message || error.message);
       return [];
     }
   }
@@ -679,11 +766,11 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Fetch deal details from HubSpot
     const deal = await hubspotClient.getDeal(dealId);
     const contacts = await hubspotClient.getAssociatedContacts(dealId);
-    const lineItems = await hubspotClient.getDealLineItems(dealId);
+    const invoiceLineItems = await hubspotClient.getDealInvoices(dealId);
 
     console.log(`📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
     console.log(`👥 Associated contacts: ${contacts.length}`);
-    console.log(`📦 Line items: ${lineItems.length}`);
+    console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
 
     // Get primary contact (first one)
     const primaryContact = contacts[0];
@@ -694,22 +781,22 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     const contactProps = primaryContact.properties;
     console.log(`👤 Primary contact: ${contactProps.email || 'No email'}`);
 
-    // Transform line items for Shopify
-    const shopifyLineItems = lineItems.map(item => {
+    // Transform invoice line items for Shopify
+    const shopifyLineItems = invoiceLineItems.map(item => {
       const props = item.properties;
       return {
-        title: props.name || 'HubSpot Deal Item',
+        title: props.name || 'HubSpot Invoice Item',
         quantity: parseInt(props.quantity) || 1,
         price: parseFloat(props.price) || parseFloat(props.amount) || '0.00',
-        sku: props.hs_sku || `HUBSPOT-${item.id}`,
-        vendor: 'HubSpot Import',
+        sku: props.hs_sku || `INVOICE-${item.id}`,
+        vendor: 'HubSpot Invoice',
         requires_shipping: true,
         taxable: true,
         fulfillment_service: 'manual'
       };
     });
 
-    // If no line items, create a placeholder item
+    // If no invoice line items, create a placeholder item
     if (shopifyLineItems.length === 0) {
       shopifyLineItems.push({
         title: deal.properties.dealname || 'HubSpot Deal',
@@ -766,7 +853,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       }
     };
 
-    console.log(`🛒 Creating Shopify order with ${shopifyLineItems.length} line items`);
+    console.log(`🛒 Creating Shopify order with ${shopifyLineItems.length} line items from HubSpot invoice`);
 
     // Create the order using REST API
     const response = await restClient.post('/orders.json', orderData);
@@ -1553,6 +1640,9 @@ app.get("/rest/locations", async (req, res) => {
 app.post("/webhook", async (req, res) => {
   try {
     console.log("🎯 HubSpot webhook received");
+    console.log("🔍 Headers:", req.headers);
+    console.log("🔍 Raw body type:", typeof req.body);
+    console.log("🔍 Raw body:", req.body);
 
     if (!hubspotClient) {
       console.warn("⚠️ HubSpot webhook received but client not configured");
