@@ -52,18 +52,57 @@ const limiter = rateLimit({
 app.use(limiter);
 
 // CORS configuration - Allow Shopify and custom domains
+const allowedOrigins = [
+  /\.myshopify\.com$/,
+  /localhost:\d+$/,
+  'https://www.exposurepack.com.au',
+  'https://exposurepack.com.au',
+  'http://www.exposurepack.com.au',
+  'http://exposurepack.com.au',
+  /\.exposurepack\.com\.au$/
+];
+
 const corsOptions = {
-  origin: NODE_ENV === "production" 
-    ? [
-        /\.myshopify\.com$/, 
-        /localhost:\d+$/,
-        'https://www.exposurepack.com.au',
-        'https://exposurepack.com.au',
-        /\.exposurepack\.com\.au$/
-      ]
-    : true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  origin: function (origin, callback) {
+    console.log('🌐 CORS check for origin:', origin);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      console.log('✅ CORS: No origin header - allowing');
+      return callback(null, true);
+    }
+    
+    // In development, allow all origins
+    if (NODE_ENV !== "production") {
+      console.log('✅ CORS: Development mode - allowing all origins');
+      return callback(null, true);
+    }
+    
+    // Check against allowed origins
+    const isAllowed = allowedOrigins.some(allowedOrigin => {
+      if (typeof allowedOrigin === 'string') {
+        const matches = origin === allowedOrigin;
+        console.log(`🔍 CORS: Checking string "${allowedOrigin}" against "${origin}": ${matches}`);
+        return matches;
+      } else if (allowedOrigin instanceof RegExp) {
+        const matches = allowedOrigin.test(origin);
+        console.log(`🔍 CORS: Checking regex ${allowedOrigin} against "${origin}": ${matches}`);
+        return matches;
+      }
+      return false;
+    });
+    
+    if (isAllowed) {
+      console.log('✅ CORS: Origin allowed');
+      callback(null, true);
+    } else {
+      console.log('❌ CORS: Origin not allowed');
+      console.log('📋 CORS: Allowed origins:', allowedOrigins);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-API-Key'],
   credentials: true
 };
 app.use(cors(corsOptions));
@@ -105,7 +144,7 @@ const upload = multer({
 // Authentication middleware
 const authenticate = (req, res, next) => {
   // Bypass authentication for webhook endpoints and test endpoints
-  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test') {
+  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test' || (req.path === '/fulfillments' && req.method === 'GET')) {
     return next();
   }
   
@@ -1414,6 +1453,19 @@ app.get("/fulfillments/test", (req, res) => {
     message: "Fulfillment endpoint is reachable",
     timestamp: new Date().toISOString(),
     server: "shopify-admin-proxy"
+  });
+});
+
+/**
+ * Debug endpoint to check if fulfillments path works
+ */
+app.get("/fulfillments", (req, res) => {
+  console.log("🧪 GET /fulfillments hit (should be POST)");
+  res.json({ 
+    error: "Method not allowed",
+    message: "This endpoint only accepts POST requests",
+    expected: "POST /fulfillments",
+    timestamp: new Date().toISOString()
   });
 });
 
