@@ -816,18 +816,26 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`👤 Primary contact: ${contactProps.email || 'No email'}`);
 
     // Transform invoice line items for Shopify
+    // Use total amount as price with quantity 1 to avoid decimal rounding issues
     const shopifyLineItems = invoiceLineItems.map(item => {
       const props = item.properties;
-      return {
-        title: props.name || 'HubSpot Invoice Item',
-        quantity: parseInt(props.quantity) || 1,
-        price: parseFloat(props.price) || parseFloat(props.amount) || '0.00',
+      const originalQuantity = parseInt(props.quantity) || 1;
+      const unitPrice = parseFloat(props.price) || 0;
+      const totalAmount = parseFloat(props.amount) || (unitPrice * originalQuantity) || 0;
+      
+      const transformedItem = {
+        title: `${props.name || 'HubSpot Invoice Item'}${originalQuantity > 1 ? ` (${originalQuantity.toLocaleString()} units)` : ''}`,
+        quantity: 1, // Always 1 to use total amount directly
+        price: totalAmount.toFixed(2), // Use total amount to avoid rounding issues
         sku: props.hs_sku || `INVOICE-${item.id}`,
         vendor: 'HubSpot Invoice',
         requires_shipping: true,
         taxable: true,
         fulfillment_service: 'manual'
       };
+      
+      console.log(`🔄 Transformed: "${props.name}" | HubSpot: ${originalQuantity} × $${unitPrice} = $${totalAmount} | Shopify: 1 × $${totalAmount.toFixed(2)}`);
+      return transformedItem;
     });
 
     // If no invoice line items, create a placeholder item
