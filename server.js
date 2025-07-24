@@ -147,7 +147,7 @@ const upload = multer({
 // Authentication middleware
 const authenticate = (req, res, next) => {
   // Bypass authentication for webhook endpoints and test endpoints
-  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test' || (req.path === '/fulfillments' && req.method === 'GET')) {
+  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test' || req.path === '/fulfillments/v2/test' || (req.path === '/fulfillments' && req.method === 'GET') || (req.path === '/fulfillments/v2' && req.method === 'GET')) {
     return next();
   }
   
@@ -1644,6 +1644,206 @@ app.post("/fulfillments", authenticate, async (req, res) => {
 });
 
 /**
+ * Fulfillment endpoint using GraphQL fulfillmentCreateV2 mutation
+ * More reliable than REST API for complex orders
+ */
+app.post("/fulfillments/v2", authenticate, async (req, res) => {
+  console.log("🚚 ===============================================");
+  console.log("🚚 Creating fulfillment via GraphQL fulfillmentCreateV2");
+
+  try {
+    const { orderId, trackingCompany, trackingNumber, notifyCustomer = true } = req.body;
+
+    if (!orderId || !trackingCompany || !trackingNumber) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields: orderId, trackingCompany, trackingNumber"
+      });
+    }
+
+    console.log(`📦 Order ID: ${orderId}`);
+    console.log(`🚚 Tracking: ${trackingCompany} - ${trackingNumber}`);
+
+    // Extract numeric order ID from GID
+    const numericOrderId = orderId.toString().replace(/^gid:\/\/shopify\/Order\//, '');
+    console.log(`🔢 Numeric Order ID: ${numericOrderId}`);
+
+    // First get fulfillment orders for this order
+    console.log(`🔍 Fetching fulfillment orders for order ${numericOrderId}...`);
+    
+    const fulfillmentOrdersQuery = `
+      query getFulfillmentOrders($orderId: ID!) {
+        order(id: $orderId) {
+          id
+          name
+          fulfillmentOrders(first: 10) {
+            edges {
+              node {
+                id
+                status
+                requestStatus
+                fulfillments {
+                  id
+                  status
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const fulfillmentOrdersResponse = await graphqlClient.query({
+      data: {
+        query: fulfillmentOrdersQuery,
+        variables: {
+          orderId: orderId
+        }
+      }
+    });
+
+    console.log(`📋 Fulfillment orders response:`, JSON.stringify(fulfillmentOrdersResponse, null, 2));
+
+    if (fulfillmentOrdersResponse.errors) {
+      throw new Error(`GraphQL error fetching fulfillment orders: ${fulfillmentOrdersResponse.errors.map(e => e.message).join(', ')}`);
+    }
+
+    const order = fulfillmentOrdersResponse.data.order;
+    if (!order) {
+      throw new Error(`Order not found: ${orderId}`);
+    }
+
+    const fulfillmentOrders = order.fulfillmentOrders.edges.map(edge => edge.node);
+    console.log(`📦 Found ${fulfillmentOrders.length} fulfillment orders`);
+
+    if (fulfillmentOrders.length === 0) {
+      throw new Error(`No fulfillment orders found for order ${orderId}`);
+    }
+
+    // Find unfulfilled fulfillment orders
+    const unfulfillmentOrders = fulfillmentOrders.filter(fo => 
+      fo.status === 'OPEN' || fo.status === 'IN_PROGRESS'
+    );
+
+    if (unfulfillmentOrders.length === 0) {
+      throw new Error(`No unfulfilled items found for order ${orderId}`);
+    }
+
+    // Get locations to find the first available location
+    console.log(`🏪 Getting store locations...`);
+    const locationsResponse = await restClient.get('/locations.json');
+    const locations = locationsResponse.locations || [];
+    
+    if (locations.length === 0) {
+      throw new Error('No locations found in store');
+    }
+
+    const locationId = `gid://shopify/Location/${locations[0].id}`;
+    console.log(`📍 Using location: ${locationId} (${locations[0].name || 'Default'})`);
+
+    // Create fulfillment using GraphQL fulfillmentCreateV2
+    const fulfillmentMutation = `
+      mutation fulfillmentCreateV2($input: FulfillmentCreateV2Input!) {
+        fulfillmentCreateV2(input: $input) {
+          fulfillment {
+            id
+            status
+            trackingInfo {
+              company
+              number
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const mutationInput = {
+      input: {
+        fulfillment: {
+          locationId: locationId,
+          trackingInfo: {
+            company: trackingCompany,
+            number: trackingNumber
+          },
+          notifyCustomer: notifyCustomer,
+          lineItemsByFulfillmentOrder: unfulfillmentOrders.map(fo => ({
+            fulfillmentOrderId: fo.id
+          }))
+        }
+      }
+    };
+
+    console.log(`🔄 Creating fulfillment with input:`, JSON.stringify(mutationInput, null, 2));
+
+    const fulfillmentResponse = await graphqlClient.query({
+      data: {
+        query: fulfillmentMutation,
+        variables: mutationInput
+      }
+    });
+
+    console.log(`✅ Fulfillment response:`, JSON.stringify(fulfillmentResponse, null, 2));
+
+    if (fulfillmentResponse.errors) {
+      throw new Error(`GraphQL error creating fulfillment: ${fulfillmentResponse.errors.map(e => e.message).join(', ')}`);
+    }
+
+    const result = fulfillmentResponse.data.fulfillmentCreateV2;
+    
+    if (result.userErrors && result.userErrors.length > 0) {
+      const errorMessages = result.userErrors.map(err => `${err.field}: ${err.message}`).join(', ');
+      throw new Error(`Fulfillment validation errors: ${errorMessages}`);
+    }
+
+    if (!result.fulfillment) {
+      throw new Error('Fulfillment creation failed - no fulfillment returned');
+    }
+
+    console.log(`✅ Fulfillment created successfully: ${result.fulfillment.id}`);
+
+    res.json({
+      success: true,
+      fulfillment: result.fulfillment,
+      message: "Fulfillment created successfully via GraphQL v2",
+      trackingNumber: trackingNumber,
+      trackingCompany: trackingCompany
+    });
+
+  } catch (error) {
+    console.error("❌ Error creating fulfillment:", error);
+    console.error("❌ Error stack:", error.stack);
+    
+    // Ensure we always return JSON, never HTML
+    res.setHeader('Content-Type', 'application/json');
+    
+    if (error.response) {
+      console.error("❌ Shopify API Error Response:");
+      console.error("📊 Status:", error.response.status || error.response.statusCode);
+      console.error("📋 Headers:", error.response.headers);
+      console.error("📄 Body:", error.response.body || error.response.data);
+      
+      return res.status(error.response.statusCode || error.response.status || 500).json({
+        error: "Shopify API Error",
+        message: error.response.body?.errors || error.response.data?.errors || error.message,
+        details: error.response.body || error.response.data,
+        shopifyStatus: error.response.status || error.response.statusCode,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    return res.status(500).json({
+      error: "Internal Server Error",
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+/**
  * File upload endpoint with improved error handling and progress tracking
  */
 app.post("/upload-file", upload.single('file'), async (req, res) => {
@@ -2407,7 +2607,8 @@ app.listen(PORT, () => {
   console.log("   🏢 GET  /rest/locations    - Store locations");
   console.log("   📝 GET  /metafields        - Metafields help");
   console.log("   💾 POST /metafields        - Manage metafields");
-  console.log("   📦 POST /fulfillments      - Create order fulfillments");
+  console.log("   📦 POST /fulfillments      - Create order fulfillments (REST)");
+  console.log("   ✨ POST /fulfillments/v2   - Create order fulfillments (GraphQL v2)");
   console.log("   🧪 GET  /fulfillments/test - Test fulfillment endpoint");
   console.log("   📤 POST /upload-file       - File uploads");
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
