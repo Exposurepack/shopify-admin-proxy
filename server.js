@@ -1693,14 +1693,19 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       }
     `;
 
-    const fulfillmentOrdersResponse = await graphqlClient.query({
-      data: {
-        query: fulfillmentOrdersQuery,
-        variables: {
-          orderId: orderId
-        }
-      }
-    });
+    console.log(`🔍 GraphQL query variables:`, { orderId });
+    console.log(`🔍 GraphQL query:`, fulfillmentOrdersQuery);
+
+    let fulfillmentOrdersResponse;
+    try {
+      fulfillmentOrdersResponse = await graphqlClient.query(fulfillmentOrdersQuery, {
+        orderId: orderId
+      });
+    } catch (graphqlError) {
+      console.error(`❌ GraphQL query failed:`, graphqlError);
+      console.error(`❌ GraphQL error details:`, graphqlError.response?.data || graphqlError.message);
+      throw new Error(`Failed to fetch fulfillment orders: ${graphqlError.message}`);
+    }
 
     console.log(`📋 Fulfillment orders response:`, JSON.stringify(fulfillmentOrdersResponse, null, 2));
 
@@ -1779,12 +1784,14 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
 
     console.log(`🔄 Creating fulfillment with input:`, JSON.stringify(mutationInput, null, 2));
 
-    const fulfillmentResponse = await graphqlClient.query({
-      data: {
-        query: fulfillmentMutation,
-        variables: mutationInput
-      }
-    });
+    let fulfillmentResponse;
+    try {
+      fulfillmentResponse = await graphqlClient.query(fulfillmentMutation, mutationInput);
+    } catch (mutationError) {
+      console.error(`❌ Fulfillment mutation failed:`, mutationError);
+      console.error(`❌ Mutation error details:`, mutationError.response?.data || mutationError.message);
+      throw new Error(`Failed to create fulfillment: ${mutationError.message}`);
+    }
 
     console.log(`✅ Fulfillment response:`, JSON.stringify(fulfillmentResponse, null, 2));
 
