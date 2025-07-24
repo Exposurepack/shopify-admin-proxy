@@ -35,6 +35,9 @@ if (!HUBSPOT_PRIVATE_APP_TOKEN) {
 // Security and performance configuration
 const app = express();
 
+// Trust proxy for proper rate limiting behind Render/CloudFlare
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: false, // Allow for API usage
@@ -1545,10 +1548,32 @@ app.post("/fulfillments", authenticate, async (req, res) => {
       console.log(`🔄 Proceeding with fulfillment anyway...`);
     }
 
+    // Get the first available location if not specified
+    if (!fulfillmentData.fulfillment.location_id || fulfillmentData.fulfillment.location_id === null) {
+      try {
+        console.log(`🏪 Getting store locations to set location_id...`);
+        const locationsResponse = await restClient.get('/locations.json');
+        const locations = locationsResponse.locations || [];
+        
+        if (locations.length > 0) {
+          fulfillmentData.fulfillment.location_id = locations[0].id;
+          console.log(`📍 Using location_id: ${fulfillmentData.fulfillment.location_id} (${locations[0].name || 'Default'})`);
+        } else {
+          console.log(`⚠️ No locations found, proceeding without location_id`);
+          delete fulfillmentData.fulfillment.location_id;
+        }
+      } catch (locationError) {
+        console.error(`⚠️ Could not fetch locations:`, locationError.message);
+        console.log(`🔄 Proceeding without location_id...`);
+        delete fulfillmentData.fulfillment.location_id;
+      }
+    }
+
     console.log(`🔍 Making Shopify REST API call:`);
     console.log(`📍 URL: /orders/${numericOrderId}/fulfillments.json`);
     console.log(`🔐 Using API version: ${SHOPIFY_API_VERSION}`);
     console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
+    console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentData, null, 2));
 
     // Create fulfillment using Shopify REST API
     const fulfillmentResponse = await restClient.post(
@@ -1578,7 +1603,18 @@ app.post("/fulfillments", authenticate, async (req, res) => {
       console.error("📊 Status:", error.response.status || error.response.statusCode);
       console.error("📋 Headers:", error.response.headers);
       console.error("📄 Body:", error.response.body || error.response.data);
-      console.error("🔍 Full Response:", JSON.stringify(error.response, null, 2));
+      // Avoid circular reference error when logging response
+      try {
+        const responseForLogging = {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          headers: error.response.headers,
+          data: error.response.data
+        };
+        console.error("🔍 Full Response:", JSON.stringify(responseForLogging, null, 2));
+      } catch (circularError) {
+        console.error("⚠️ Response contains circular references, skipping full log");
+      }
       
       // Special handling for 406 errors
       if (error.response.status === 406 || error.response.statusCode === 406) {
