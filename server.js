@@ -1667,6 +1667,9 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     // Extract numeric order ID from GID
     const numericOrderId = orderId.toString().replace(/^gid:\/\/shopify\/Order\//, '');
     console.log(`🔢 Numeric Order ID: ${numericOrderId}`);
+    
+    // Quick validation: check if this matches the order being dispatched
+    console.log(`⚠️ VERIFY: Is this the correct order? Check that ${numericOrderId} matches the order you're dispatching`);
 
     // First get fulfillment orders for this order
     console.log(`🔍 Fetching fulfillment orders for order ${numericOrderId}...`);
@@ -1682,9 +1685,13 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
                 id
                 status
                 requestStatus
-                fulfillments {
-                  id
-                  status
+                fulfillments(first: 5) {
+                  edges {
+                    node {
+                      id
+                      status
+                    }
+                  }
                 }
               }
             }
@@ -1713,7 +1720,7 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       throw new Error(`GraphQL error fetching fulfillment orders: ${fulfillmentOrdersResponse.errors.map(e => e.message).join(', ')}`);
     }
 
-    const order = fulfillmentOrdersResponse.data.order;
+    const order = fulfillmentOrdersResponse.order;
     if (!order) {
       throw new Error(`Order not found: ${orderId}`);
     }
@@ -1725,13 +1732,25 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       throw new Error(`No fulfillment orders found for order ${orderId}`);
     }
 
+    // Log fulfillment order details for debugging
+    fulfillmentOrders.forEach((fo, index) => {
+      console.log(`📋 Fulfillment Order ${index + 1}:`, {
+        id: fo.id,
+        status: fo.status,
+        requestStatus: fo.requestStatus,
+        existingFulfillments: fo.fulfillments?.edges?.length || 0
+      });
+    });
+
     // Find unfulfilled fulfillment orders
     const unfulfillmentOrders = fulfillmentOrders.filter(fo => 
       fo.status === 'OPEN' || fo.status === 'IN_PROGRESS'
     );
 
+    console.log(`🔍 Found ${unfulfillmentOrders.length} unfulfilled fulfillment orders out of ${fulfillmentOrders.length} total`);
+
     if (unfulfillmentOrders.length === 0) {
-      throw new Error(`No unfulfilled items found for order ${orderId}`);
+      throw new Error(`No unfulfilled items found for order ${orderId}. All fulfillment orders have status: ${fulfillmentOrders.map(fo => fo.status).join(', ')}`);
     }
 
     // Get locations to find the first available location
