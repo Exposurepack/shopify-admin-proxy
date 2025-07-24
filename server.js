@@ -1406,6 +1406,18 @@ app.post("/metafields", async (req, res) => {
 });
 
 /**
+ * Test endpoint to verify server connectivity
+ */
+app.get("/fulfillments/test", (req, res) => {
+  console.log("🧪 Test endpoint hit");
+  res.json({ 
+    message: "Fulfillment endpoint is reachable",
+    timestamp: new Date().toISOString(),
+    server: "shopify-admin-proxy"
+  });
+});
+
+/**
  * Fulfillment endpoint - Creates Shopify fulfillments with tracking info
  */
 app.post("/fulfillments", authenticate, async (req, res) => {
@@ -1456,6 +1468,10 @@ app.post("/fulfillments", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error creating fulfillment:", error);
+    console.error("❌ Error stack:", error.stack);
+    
+    // Ensure we always return JSON, never HTML
+    res.setHeader('Content-Type', 'application/json');
     
     if (error.response?.body) {
       console.error("❌ Shopify API Error Details:", error.response.body);
@@ -1463,13 +1479,15 @@ app.post("/fulfillments", authenticate, async (req, res) => {
       return res.status(error.response.statusCode || 500).json({
         error: "Shopify API Error",
         message: error.response.body.errors || error.message,
-        details: error.response.body
+        details: error.response.body,
+        timestamp: new Date().toISOString()
       });
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "Internal Server Error",
-      message: error.message
+      message: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -2211,6 +2229,7 @@ app.use('*', (req, res) => {
       "GET /rest/locations",
       "GET /metafields",
       "POST /metafields",
+      "GET /fulfillments/test",
       "POST /fulfillments",
       "POST /upload-file",
       "POST /webhook",
