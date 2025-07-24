@@ -105,7 +105,7 @@ const upload = multer({
 // Authentication middleware
 const authenticate = (req, res, next) => {
   // Bypass authentication for webhook endpoints
-  if (req.path === '/webhook') {
+  if (req.path === '/webhook' || req.path === '/shopify-webhook') {
     return next();
   }
   
@@ -745,6 +745,97 @@ class HubSpotClient {
       return [];
     }
   }
+
+  async createOrUpdateContact(contactData) {
+    try {
+      console.log(`👤 Creating/updating contact: ${contactData.email}`);
+      
+      // First, try to find existing contact by email
+      try {
+        const searchResponse = await axios.post(
+          `${this.baseURL}/crm/v3/objects/contacts/search`,
+          {
+            filterGroups: [{
+              filters: [{
+                propertyName: 'email',
+                operator: 'EQ',
+                value: contactData.email
+              }]
+            }]
+          },
+          { headers: this.headers }
+        );
+
+        if (searchResponse.data.results && searchResponse.data.results.length > 0) {
+          // Contact exists, update it
+          const existingContact = searchResponse.data.results[0];
+          console.log(`✅ Found existing contact: ${existingContact.id}`);
+          
+          const updateResponse = await axios.patch(
+            `${this.baseURL}/crm/v3/objects/contacts/${existingContact.id}`,
+            { properties: contactData },
+            { headers: this.headers }
+          );
+          
+          return updateResponse.data;
+        }
+      } catch (searchError) {
+        console.log(`ℹ️ Contact search failed, will create new: ${searchError.message}`);
+      }
+
+      // Contact doesn't exist, create new one
+      const createResponse = await axios.post(
+        `${this.baseURL}/crm/v3/objects/contacts`,
+        { properties: contactData },
+        { headers: this.headers }
+      );
+
+      console.log(`✅ Created new contact: ${createResponse.data.id}`);
+      return createResponse.data;
+
+    } catch (error) {
+      console.error(`❌ Failed to create/update contact:`, error.response?.data?.message || error.message);
+      throw error;
+    }
+  }
+
+  async createDeal(dealData) {
+    try {
+      console.log(`🤝 Creating deal: ${dealData.dealname}`);
+      
+      const response = await axios.post(
+        `${this.baseURL}/crm/v3/objects/deals`,
+        { properties: dealData },
+        { headers: this.headers }
+      );
+
+      console.log(`✅ Created deal: ${response.data.id} - ${dealData.dealname}`);
+      return response.data;
+
+    } catch (error) {
+      console.error(`❌ Failed to create deal:`, error.response?.data?.message || error.message);
+      throw error;
+    }
+  }
+
+  async associateContactWithDeal(contactId, dealId) {
+    try {
+      console.log(`🔗 Associating contact ${contactId} with deal ${dealId}`);
+      
+      const response = await axios.put(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/contacts/${contactId}/280`,
+        {},
+        { headers: this.headers }
+      );
+
+      console.log(`✅ Associated contact with deal successfully`);
+      return response.data;
+
+    } catch (error) {
+      console.warn(`⚠️ Failed to associate contact with deal:`, error.response?.data?.message || error.message);
+      // Don't throw error - association failure shouldn't break the whole flow
+    }
+  }
 }
 
 /**
@@ -801,6 +892,92 @@ const validateOrderGID = (orderGID) => {
   }
   return true;
 };
+
+/**
+ * Creates a HubSpot deal from Shopify order data
+ */
+async function createHubSpotDealFromShopifyOrder(order) {
+  if (!HUBSPOT_PRIVATE_APP_TOKEN) {
+    console.log("⚠️ HubSpot token not configured - cannot create deal");
+    return;
+  }
+
+  console.log(`🔄 Creating HubSpot deal from Shopify order: ${order.name}`);
+
+  try {
+    // Extract customer information
+    const customer = order.customer || {};
+    const billingAddress = order.billing_address || {};
+    const shippingAddress = order.shipping_address || {};
+
+    // Prepare contact data
+    const contactData = {
+      email: customer.email || billingAddress.email || 'unknown@shopify.com',
+      firstname: customer.first_name || billingAddress.first_name || '',
+      lastname: customer.last_name || billingAddress.last_name || '',
+      phone: customer.phone || billingAddress.phone || '',
+      address: billingAddress.address1 || '',
+      city: billingAddress.city || '',
+      state: billingAddress.province || '',
+      country: billingAddress.country || '',
+      zip: billingAddress.zip || '',
+      company: billingAddress.company || ''
+    };
+
+    // Create or update contact in HubSpot
+    let contact;
+    try {
+      contact = await hubspotClient.createOrUpdateContact(contactData);
+      console.log(`👤 Contact ready: ${contact.id} - ${contactData.email}`);
+    } catch (contactError) {
+      console.error(`❌ Failed to create contact, continuing without: ${contactError.message}`);
+    }
+
+    // Calculate deal amount
+    const dealAmount = parseFloat(order.total_price) || 0;
+    const currency = order.currency || 'AUD';
+
+    // Prepare deal data
+    const dealData = {
+      dealname: `Shopify Order ${order.name}`,
+      amount: dealAmount,
+      dealstage: 'closedwon', // Set to closed won as requested
+      pipeline: 'default', // You may need to adjust this based on your HubSpot setup
+      closedate: new Date().toISOString().split('T')[0], // Today's date
+      hubspot_owner_id: '', // You can set a default owner if needed
+      
+      // Custom properties for Shopify data
+      shopify_order_id: order.id,
+      shopify_order_number: order.name,
+      shopify_order_status: order.financial_status,
+      shopify_fulfillment_status: order.fulfillment_status || 'unfulfilled',
+      
+      // Additional info
+      hs_deal_currency_code: currency,
+      deal_source: 'Shopify',
+      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nItems: ${order.line_items?.length || 0}\nCustomer: ${customer.email || 'N/A'}`
+    };
+
+    console.log(`🤝 Creating deal: ${dealData.dealname} - $${dealAmount} ${currency}`);
+
+    // Create deal in HubSpot
+    const deal = await hubspotClient.createDeal(dealData);
+    console.log(`✅ Created HubSpot deal: ${deal.id} - ${dealData.dealname}`);
+
+    // Associate contact with deal if both exist
+    if (contact && deal) {
+      await hubspotClient.associateContactWithDeal(contact.id, deal.id);
+    }
+
+    console.log(`✅ Successfully created HubSpot deal from Shopify order ${order.name}`);
+    return deal;
+
+  } catch (error) {
+    console.error(`❌ Error creating HubSpot deal from Shopify order:`, error.message);
+    console.error(`❌ Stack trace:`, error.stack);
+    throw error;
+  }
+}
 
 /**
  * Creates a Shopify order from HubSpot deal data
@@ -1763,6 +1940,56 @@ app.get("/rest/locations", async (req, res) => {
 });
 
 /**
+ * Shopify webhook endpoint for order creation
+ * Creates a deal in HubSpot when a new order is placed
+ */
+app.post("/shopify-webhook", async (req, res) => {
+  try {
+    console.log("🛒 Shopify webhook received - Order created");
+    console.log("🔍 Headers:", req.headers);
+    console.log("🔍 Raw body type:", typeof req.body);
+    
+    if (!hubspotClient) {
+      console.log("⚠️ HubSpot client not available - cannot create deal");
+      return res.status(200).json({ received: true, processed: false, message: "HubSpot not configured" });
+    }
+
+    let order;
+    try {
+      order = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (parseError) {
+      console.error("❌ Failed to parse Shopify webhook payload:", parseError.message);
+      return res.status(200).json({ received: true, processed: false, message: "Invalid JSON payload" });
+    }
+
+    console.log("🛒 Shopify order received:", JSON.stringify(order, null, 2));
+
+    // Create HubSpot deal from Shopify order
+    await createHubSpotDealFromShopifyOrder(order);
+
+    res.status(200).json({ 
+      received: true, 
+      processed: true, 
+      message: "Deal created in HubSpot successfully",
+      orderId: order.id,
+      orderNumber: order.name
+    });
+
+  } catch (error) {
+    console.error("❌ Error processing Shopify webhook:", error.message);
+    console.error("❌ Stack trace:", error.stack);
+    
+    // Always return 200 to prevent Shopify retries
+    res.status(200).json({ 
+      received: true, 
+      processed: false, 
+      error: error.message,
+      message: "Error occurred but webhook acknowledged" 
+    });
+  }
+});
+
+/**
  * HubSpot webhook endpoint for deal stage changes
  * Bypasses authentication for webhook calls
  */
@@ -1916,7 +2143,8 @@ app.use('*', (req, res) => {
       "GET /metafields",
       "POST /metafields",
       "POST /upload-file",
-      "POST /webhook"
+      "POST /webhook",
+      "POST /shopify-webhook"
     ]
   });
 });
