@@ -896,10 +896,21 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         // Add tax lines if we have invoice tax information
         ...(invoiceInfo && invoiceInfo.tax > 0 ? {
           tax_lines: [{
-            title: 'Tax',
+            title: 'GST',
             price: invoiceInfo.tax.toFixed(2),
-            rate: 0.10 // Default 10% rate - adjust as needed
-          }]
+            rate: (invoiceInfo.subtotal > 0 ? (invoiceInfo.tax / invoiceInfo.subtotal) : 0.10),
+            price_set: {
+              shop_money: {
+                amount: invoiceInfo.tax.toFixed(2),
+                currency_code: invoiceInfo.currency || 'AUD'
+              },
+              presentment_money: {
+                amount: invoiceInfo.tax.toFixed(2),
+                currency_code: invoiceInfo.currency || 'AUD'
+              }
+            }
+          }],
+          total_tax: invoiceInfo.tax.toFixed(2)
         } : {}),
         // Add discount lines if we have invoice discount information
         ...(invoiceInfo && invoiceInfo.discount > 0 ? {
@@ -913,6 +924,14 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     };
 
     console.log(`🛒 Creating Shopify order with ${shopifyLineItems.length} line items from HubSpot invoice`);
+    
+    // Debug tax information
+    if (invoiceInfo && invoiceInfo.tax > 0) {
+      console.log(`💰 Adding tax to Shopify order: $${invoiceInfo.tax} (${((invoiceInfo.tax / invoiceInfo.subtotal) * 100).toFixed(1)}%)`);
+      console.log(`💰 Order data tax_lines:`, JSON.stringify(orderData.order.tax_lines, null, 2));
+    } else {
+      console.log(`⚠️ No tax information found in invoice data`);
+    }
 
     // Create the order using REST API
     const response = await restClient.post('/orders.json', orderData);
