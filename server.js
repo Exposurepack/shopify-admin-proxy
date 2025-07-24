@@ -542,6 +542,7 @@ class HubSpotClient {
 
   async getDealInvoices(dealId) {
     try {
+      console.log(`🔍 Fetching invoices for deal ${dealId}...`);
       // First, get invoices associated with the deal
       const response = await axios.get(
         `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/invoices`,
@@ -551,13 +552,17 @@ class HubSpotClient {
         }
       );
       
+      console.log(`📊 Invoice association response:`, JSON.stringify(response.data, null, 2));
+      
       if (!response.data.results || response.data.results.length === 0) {
-        console.log(`ℹ️ No invoices found for deal ${dealId}`);
-        return [];
+        console.log(`ℹ️ No invoices found for deal ${dealId} - falling back to deal line items`);
+        const fallbackItems = await this.getDealLineItems(dealId);
+        return Array.isArray(fallbackItems) ? fallbackItems : [];
       }
 
       // Get the most recent invoice (or first one)
       const invoiceId = response.data.results[0].id;
+      console.log(`📄 Processing invoice ID: ${invoiceId}`);
       
       // Fetch detailed invoice data including line items and tax
       const invoiceResponse = await axios.get(
@@ -579,6 +584,8 @@ class HubSpotClient {
           }
         }
       );
+      
+      console.log(`📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
 
       const invoice = invoiceResponse.data;
       
@@ -622,6 +629,12 @@ class HubSpotClient {
       
       console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number} with ${lineItems.length} line items`);
       console.log(`💰 Invoice totals - Subtotal: $${invoice.properties.hs_subtotal_amount || 'N/A'}, Tax: $${invoice.properties.hs_tax_amount || 'N/A'}, Total: $${invoice.properties.hs_total_amount || 'N/A'}`);
+      console.log(`🔍 All invoice properties:`, Object.keys(invoice.properties || {}));
+      console.log(`🔍 Tax-related properties:`, {
+        hs_tax_amount: invoice.properties.hs_tax_amount,
+        hs_subtotal_amount: invoice.properties.hs_subtotal_amount,
+        hs_total_amount: invoice.properties.hs_total_amount
+      });
       
       // Return both line items and invoice totals
       return {
