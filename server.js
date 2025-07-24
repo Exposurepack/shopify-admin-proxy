@@ -1550,7 +1550,7 @@ app.get("/rest/locations", async (req, res) => {
  * HubSpot webhook endpoint for deal stage changes
  * Bypasses authentication for webhook calls
  */
-app.post("/webhook", express.raw({ type: 'application/json' }), async (req, res) => {
+app.post("/webhook", async (req, res) => {
   try {
     console.log("🎯 HubSpot webhook received");
 
@@ -1569,24 +1569,50 @@ app.post("/webhook", express.raw({ type: 'application/json' }), async (req, res)
       payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     } catch (parseError) {
       console.error("❌ Failed to parse webhook payload:", parseError.message);
+      console.error("❌ Raw body:", req.body);
       return res.status(200).json({ received: true, processed: false, message: "Invalid JSON payload" });
     }
 
     console.log("📋 Webhook payload received:", JSON.stringify(payload, null, 2));
+    console.log("📋 Payload type:", typeof payload);
+    console.log("📋 Is array:", Array.isArray(payload));
+    console.log("📋 Payload length:", payload?.length);
 
-    // Extract data from the first item in the payload array
-    if (!Array.isArray(payload) || payload.length === 0) {
-      console.warn("⚠️ Webhook payload is not an array or is empty");
-      return res.status(200).json({ received: true, processed: false, message: "Empty or invalid payload format" });
+    // Handle different payload formats
+    let dealData;
+    
+    // Case 1: Array format (most common HubSpot format)
+    if (Array.isArray(payload) && payload.length > 0) {
+      dealData = payload[0];
+    }
+    // Case 2: Single object format
+    else if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      dealData = payload;
+    }
+    // Case 3: Empty or invalid
+    else {
+      console.warn("⚠️ Webhook payload is not an array or object, or is empty");
+      console.warn("⚠️ Payload:", payload);
+      return res.status(200).json({ 
+        received: true, 
+        processed: false, 
+        message: "Empty or invalid payload format",
+        debug: {
+          type: typeof payload,
+          isArray: Array.isArray(payload),
+          length: payload?.length,
+          payload: payload
+        }
+      });
     }
 
-    const firstItem = payload[0];
-    const { objectId, propertyName, newValue, propertyValue } = firstItem;
+    const { objectId, propertyName, newValue, propertyValue } = dealData;
     
     // HubSpot can send either 'newValue' or 'propertyValue'
     const value = newValue || propertyValue;
 
     console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, value=${value}`);
+    console.log(`🔍 Deal data keys:`, Object.keys(dealData));
 
     // Check if this is a dealstage change to closedwon
     if (propertyName === 'dealstage' && value === 'closedwon') {
