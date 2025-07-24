@@ -1581,12 +1581,15 @@ app.post("/webhook", express.raw({ type: 'application/json' }), async (req, res)
     }
 
     const firstItem = payload[0];
-    const { objectId, propertyName, newValue } = firstItem;
+    const { objectId, propertyName, newValue, propertyValue } = firstItem;
+    
+    // HubSpot can send either 'newValue' or 'propertyValue'
+    const value = newValue || propertyValue;
 
-    console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, newValue=${newValue}`);
+    console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, value=${value}`);
 
     // Check if this is a dealstage change to closedwon
-    if (propertyName === 'dealstage' && newValue === 'closedwon') {
+    if (propertyName === 'dealstage' && value === 'closedwon') {
       console.log(`🎉 Deal ${objectId} moved to 'closedwon' - creating Shopify order`);
 
       try {
@@ -1623,7 +1626,7 @@ app.post("/webhook", express.raw({ type: 'application/json' }), async (req, res)
         processed: false,
         message: `Webhook ignored - not a dealstage change to closedwon`,
         propertyName,
-        newValue
+        value
       });
     }
 
