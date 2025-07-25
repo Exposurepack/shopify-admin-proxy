@@ -530,8 +530,20 @@ class HubSpotClient {
         {
           headers: this.headers,
           params: {
-            // Request ALL deal properties to see what's available
-            properties: 'all',
+            properties: [
+              // Basic deal properties (restore working functionality)
+              'dealname', 'amount', 'dealstage', 'closedate', 'hs_object_id',
+              'notes_last_contacted', 'description', 'deal_currency_code',
+              'hs_deal_stage_probability', 'hubspot_owner_id',
+              // Add common HubSpot custom property patterns for addresses
+              'shipping_address', 'billing_address', 'delivery_address',
+              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_zip',
+              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip',
+              // Try common custom field naming patterns
+              'address_line_1', 'address_line_2', 'street_address', 'delivery_street',
+              'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
+              'billing_street', 'billing_city', 'billing_state', 'billing_zip'
+            ].join(','),
             associations: 'contacts,line_items'
           },
           timeout: 30000
@@ -550,8 +562,18 @@ class HubSpotClient {
         {
           headers: this.headers,
           params: {
-            // Request ALL contact properties to see what's available
-            properties: 'all'
+            properties: [
+              // Basic contact info (restore working functionality)
+              'firstname', 'lastname', 'email', 'phone', 'company',
+              'address', 'city', 'state', 'zip', 'country',
+              // Add common HubSpot custom address field patterns
+              'street', 'address1', 'address2', 'street_address', 'mailing_address',
+              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
+              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
+              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
+              // Alternative common patterns
+              'address_line_1', 'address_line_2', 'postal_code', 'postcode'
+            ].join(',')
           },
           timeout: 30000
         }
@@ -592,8 +614,19 @@ class HubSpotClient {
         {
           headers: this.headers,
           params: {
-            // Request ALL properties to see what HubSpot actually stores
-            properties: 'all',
+            properties: [
+              // Basic invoice properties (restore working functionality)
+              'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id',
+              'hs_tax_amount', 'hs_subtotal_amount', 'hs_total_amount', 'hs_discount_amount',
+              'hs_invoice_number', 'hs_status',
+              // Add common invoice address field patterns
+              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_zip',
+              'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_zip',
+              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
+              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
+              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
+              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip'
+            ].join(','),
             associations: 'line_items'
           }
         }
