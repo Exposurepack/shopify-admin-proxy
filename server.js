@@ -1365,11 +1365,31 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`   👤 Contact address:`, contactAddress);
     
     // Build final addresses with comprehensive fallback logic
-    // Priority: Deal address → Invoice address → Contact address → Other type
-    const shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
-                           invoiceBillingAddress || contactAddress;
-    const billingAddress = dealBillingAddress || invoiceBillingAddress || dealShippingAddress || 
-                          invoiceShippingAddress || contactAddress;
+    // Priority: Deal address → Invoice address → Contact address → Manual entry
+    let shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
+                         invoiceBillingAddress || contactAddress;
+    let billingAddress = dealBillingAddress || invoiceBillingAddress || dealShippingAddress || 
+                        invoiceShippingAddress || contactAddress;
+    
+    // Manual address override for specific known deals (temporary solution)
+    // TODO: Remove this when HubSpot properly stores address data
+    if (dealId === 40546879900 || dealId === '40546879900') {
+      console.log(`🔧 Applying manual address override for deal ${dealId}`);
+      const manualAddress = {
+        first_name: firstName,
+        last_name: lastName,
+        company: contactProps.company || 'The hoi polloi',
+        address1: '234-226 flinders street',
+        city: 'Townsville',
+        province: 'QLD',
+        country: 'Australia',
+        zip: '4812',
+        phone: formattedPhone
+      };
+      shippingAddress = manualAddress;
+      billingAddress = manualAddress;
+      console.log(`🔧 Manual address applied:`, manualAddress);
+    }
     
     console.log(`🏠 Final addresses:`);
     console.log(`   📦 Shipping:`, shippingAddress);
