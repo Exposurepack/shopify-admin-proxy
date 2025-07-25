@@ -1122,25 +1122,54 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       });
     }
 
-    // Build customer data
+    // Build customer data with validation fixes
+    const firstName = contactProps.firstname || 'Customer';
+    const lastName = contactProps.lastname || 'Name'; // Fix: Shopify requires last name
+    const rawPhone = contactProps.phone || '';
+    
+    // Fix: Format phone number for Australian format (Shopify validation)
+    let formattedPhone = null;
+    if (rawPhone) {
+      // Remove all non-digit characters
+      const digitsOnly = rawPhone.replace(/\D/g, '');
+      
+      // Convert to Australian international format (+61...)
+      if (digitsOnly.startsWith('0') && digitsOnly.length === 10) {
+        // Australian mobile: 0432293345 -> +61432293345
+        formattedPhone = `+61${digitsOnly.slice(1)}`;
+      } else if (digitsOnly.length === 9) {
+        // Missing leading 0: 432293345 -> +61432293345
+        formattedPhone = `+61${digitsOnly}`;
+      } else if (digitsOnly.startsWith('61') && digitsOnly.length === 11) {
+        // Already in AU format without +: 61432293345 -> +61432293345
+        formattedPhone = `+${digitsOnly}`;
+      } else if (digitsOnly.startsWith('614') && digitsOnly.length === 12) {
+        // Already in full AU format: 61432293345 -> +61432293345
+        formattedPhone = `+${digitsOnly}`;
+      } else {
+        // Keep original if we can't parse it, but add + if it looks international
+        formattedPhone = digitsOnly.length >= 10 ? `+${digitsOnly}` : rawPhone;
+      }
+    }
+
     const customer = {
-      first_name: contactProps.firstname || '',
-      last_name: contactProps.lastname || '',
+      first_name: firstName,
+      last_name: lastName,
       email: contactProps.email || `hubspot-${dealId}@placeholder.com`,
-      phone: contactProps.phone || null
+      phone: formattedPhone
     };
 
     // Build address (use contact address or company address)
     const address = {
-      first_name: contactProps.firstname || '',
-      last_name: contactProps.lastname || '',
+      first_name: firstName,
+      last_name: lastName,
       company: contactProps.company || '',
       address1: contactProps.address || '',
       city: contactProps.city || '',
       province: contactProps.state || '',
       country: contactProps.country || 'Australia', // Default for AU business
       zip: contactProps.zip || '',
-      phone: contactProps.phone || null
+      phone: formattedPhone
     };
 
     // Create order via Shopify REST API
