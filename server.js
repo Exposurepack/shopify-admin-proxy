@@ -1164,11 +1164,18 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       }
     }
 
+    // Determine company name for customer record
+    const companyName = contactProps.company || 
+                       deal.properties.dealname?.split(' - ')[0] || // Extract from deal name
+                       'HubSpot Customer';
+
     const customer = {
       first_name: firstName,
       last_name: lastName,
       email: contactProps.email || `hubspot-${dealId}@placeholder.com`,
-      phone: formattedPhone
+      phone: formattedPhone,
+      // Note: Shopify customer object doesn't have company field, 
+      // but we'll ensure it's in shipping/billing addresses
     };
 
     // Extract address information from multiple sources
@@ -1268,40 +1275,40 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     };
 
     // Helper function to extract address from contact properties
-    const getContactAddress = () => {
-      // Try multiple field name variations that HubSpot uses
-      const address1 = contactProps.address || contactProps.street || contactProps.address1 || 
-                       contactProps.street_address || contactProps.mailing_address || 
-                       contactProps.billing_address || contactProps.shipping_address || '';
-      
-      const city = contactProps.city || contactProps.mailing_city || 
-                   contactProps.billing_city || contactProps.shipping_city || '';
-      
-      const state = contactProps.state || contactProps.province || contactProps.region ||
-                    contactProps.mailing_state || contactProps.billing_state || 
-                    contactProps.shipping_state || '';
-      
-      const country = contactProps.country || contactProps.mailing_country ||
-                      contactProps.billing_country || contactProps.shipping_country || 'Australia';
-      
-      const zip = contactProps.zip || contactProps.postal_code || contactProps.postcode ||
-                  contactProps.zipcode || contactProps.mailing_zip || 
-                  contactProps.billing_zip || contactProps.shipping_zip || '';
-      
-      console.log(`👤 Contact address extraction - address1: "${address1}", city: "${city}", state: "${state}", zip: "${zip}"`);
-      
-      return {
-        first_name: firstName,
-        last_name: lastName,
-        company: contactProps.company || '',
-        address1: address1,
-        city: city,
-        province: state,
-        country: country,
-        zip: zip,
-        phone: formattedPhone
+          const getContactAddress = () => {
+        // Try multiple field name variations that HubSpot uses
+        const address1 = contactProps.address || contactProps.street || contactProps.address1 || 
+                         contactProps.street_address || contactProps.mailing_address || 
+                         contactProps.billing_address || contactProps.shipping_address || '';
+        
+        const city = contactProps.city || contactProps.mailing_city || 
+                     contactProps.billing_city || contactProps.shipping_city || '';
+        
+        const state = contactProps.state || contactProps.province || contactProps.region ||
+                      contactProps.mailing_state || contactProps.billing_state || 
+                      contactProps.shipping_state || '';
+        
+        const country = contactProps.country || contactProps.mailing_country ||
+                        contactProps.billing_country || contactProps.shipping_country || 'Australia';
+        
+        const zip = contactProps.zip || contactProps.postal_code || contactProps.postcode ||
+                    contactProps.zipcode || contactProps.mailing_zip || 
+                    contactProps.billing_zip || contactProps.shipping_zip || '';
+        
+        console.log(`👤 Contact address extraction - address1: "${address1}", city: "${city}", state: "${state}", zip: "${zip}"`);
+        
+        return {
+          first_name: firstName,
+          last_name: lastName,
+          company: companyName, // Use determined company name
+          address1: address1,
+          city: city,
+          province: state,
+          country: country,
+          zip: zip,
+          phone: formattedPhone
+        };
       };
-    };
     
     // Helper function to extract address from invoice if available
     const getInvoiceAddress = (type = 'shipping') => {
@@ -1371,24 +1378,58 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     let billingAddress = dealBillingAddress || invoiceBillingAddress || dealShippingAddress || 
                         invoiceShippingAddress || contactAddress;
     
-    // Manual address override for specific known deals (temporary solution)
+    // Manual address database for known customers (temporary solution)
     // TODO: Remove this when HubSpot properly stores address data
-    if (dealId === 40546879900 || dealId === '40546879900') {
-      console.log(`🔧 Applying manual address override for deal ${dealId}`);
-      const manualAddress = {
-        first_name: firstName,
-        last_name: lastName,
-        company: contactProps.company || 'The hoi polloi',
+    const knownAddresses = {
+      // Deal ID based addresses
+      '40546879900': {
+        company: 'The hoi polloi',
         address1: '234-226 flinders street',
         city: 'Townsville',
         province: 'QLD',
+        zip: '4812'
+      },
+      // Email based addresses
+      'admin@thehoi.com.au': {
+        company: 'The hoi polloi', 
+        address1: '234-226 flinders street',
+        city: 'Townsville',
+        province: 'QLD',
+        zip: '4812'
+      },
+      'info@alfabakehouse.com.au': {
+        company: 'Alfa Bakehouse',
+        address1: 'TBC - Contact customer for address',
+        city: 'TBC',
+        province: 'TBC', 
+        zip: 'TBC'
+      }
+    };
+    
+    // Try to find address by deal ID or email
+    const dealKey = dealId.toString();
+    const emailKey = contactProps.email?.toLowerCase();
+    let knownAddress = knownAddresses[dealKey] || knownAddresses[emailKey];
+    
+    if (knownAddress) {
+      console.log(`🔧 Applying manual address override for ${dealKey} / ${emailKey}`);
+      const manualAddress = {
+        first_name: firstName,
+        last_name: lastName,
+                   company: knownAddress.company || companyName,
+        address1: knownAddress.address1,
+        city: knownAddress.city,
+        province: knownAddress.province,
         country: 'Australia',
-        zip: '4812',
+        zip: knownAddress.zip,
         phone: formattedPhone
       };
       shippingAddress = manualAddress;
       billingAddress = manualAddress;
       console.log(`🔧 Manual address applied:`, manualAddress);
+    } else {
+      console.log(`⚠️ No manual address found for deal ${dealKey} or email ${emailKey}`);
+      console.log(`📝 Consider adding address manually to knownAddresses database`);
     }
     
     console.log(`🏠 Final addresses:`);
