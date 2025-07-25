@@ -606,15 +606,28 @@ class HubSpotClient {
       const invoiceId = response.data.results[0].id;
       console.log(`📄 Processing invoice ID: ${invoiceId}`);
       
-      // Fetch detailed invoice data including line items and tax
-      // First, try with all properties to see what's available
+      // Fetch detailed invoice data including line items, tax, and address info
       const invoiceResponse = await axios.get(
         `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
         {
           headers: this.headers,
           params: {
-            // Request all properties to see what's available
-            properties: 'all',
+            // Request specific properties including address fields
+            properties: [
+              'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id',
+              'hs_tax_amount', 'hs_subtotal_amount', 'hs_total_amount', 'hs_discount_amount',
+              'hs_invoice_number', 'hs_status',
+              // Billing address fields
+              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_province',
+              'billing_country', 'billing_zip', 'billing_postal_code', 'billing_company',
+              'bill_to_address1', 'bill_to_city', 'bill_to_state', 'bill_to_country', 'bill_to_zip', 'bill_to_company',
+              // Shipping address fields  
+              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_province',
+              'shipping_country', 'shipping_zip', 'shipping_postal_code', 'shipping_company',
+              'ship_to_address1', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_country', 'ship_to_zip', 'ship_to_company',
+              // Alternative address field patterns
+              'address', 'street', 'city', 'state', 'country', 'zip', 'postal_code'
+            ],
             associations: 'line_items'
           }
         }
@@ -1159,26 +1172,99 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       phone: formattedPhone
     };
 
-    // Build address (use contact address or company address)
-    const address = {
-      first_name: firstName,
-      last_name: lastName,
-      company: contactProps.company || '',
-      address1: contactProps.address || '',
-      city: contactProps.city || '',
-      province: contactProps.state || '',
-      country: contactProps.country || 'Australia', // Default for AU business
-      zip: contactProps.zip || '',
-      phone: formattedPhone
+    // Extract address information from multiple sources
+    console.log(`🏠 Extracting address information...`);
+    console.log(`📋 Contact properties:`, contactProps);
+    console.log(`📋 Invoice info:`, invoiceInfo);
+    
+    // Helper function to extract address from contact properties
+    const getContactAddress = () => {
+      return {
+        first_name: firstName,
+        last_name: lastName,
+        company: contactProps.company || '',
+        address1: contactProps.address || contactProps.street || '',
+        city: contactProps.city || '',
+        province: contactProps.state || contactProps.province || '',
+        country: contactProps.country || 'Australia',
+        zip: contactProps.zip || contactProps.postal_code || contactProps.postcode || '',
+        phone: formattedPhone
+      };
     };
+    
+    // Helper function to extract address from invoice if available
+    const getInvoiceAddress = (type = 'shipping') => {
+      if (!invoiceInfo || !invoiceInfo.properties) return null;
+      
+      const props = invoiceInfo.properties;
+      console.log(`🏠 Looking for ${type} address in invoice properties:`, Object.keys(props));
+      
+      // Common HubSpot invoice address field patterns
+      const addressFields = {
+        billing: {
+          address1: props.billing_address || props.billing_street || props.bill_to_address1 || '',
+          city: props.billing_city || props.bill_to_city || '',
+          province: props.billing_state || props.billing_province || props.bill_to_state || '',
+          country: props.billing_country || props.bill_to_country || 'Australia',
+          zip: props.billing_zip || props.billing_postal_code || props.bill_to_zip || '',
+          company: props.billing_company || props.bill_to_company || contactProps.company || ''
+        },
+        shipping: {
+          address1: props.shipping_address || props.shipping_street || props.ship_to_address1 || props.ship_to_street || '',
+          city: props.shipping_city || props.ship_to_city || '',
+          province: props.shipping_state || props.shipping_province || props.ship_to_state || '',
+          country: props.shipping_country || props.ship_to_country || 'Australia',
+          zip: props.shipping_zip || props.shipping_postal_code || props.ship_to_zip || '',
+          company: props.shipping_company || props.ship_to_company || contactProps.company || ''
+        }
+      };
+      
+      const addressData = addressFields[type];
+      
+      // Only return if we have at least address1 or city
+      if (addressData.address1 || addressData.city) {
+        return {
+          first_name: firstName,
+          last_name: lastName,
+          company: addressData.company,
+          address1: addressData.address1,
+          city: addressData.city,
+          province: addressData.province,
+          country: addressData.country,
+          zip: addressData.zip,
+          phone: formattedPhone
+        };
+      }
+      
+      return null;
+    };
+    
+    // Try to get specific addresses, with fallbacks
+    const invoiceShippingAddress = getInvoiceAddress('shipping');
+    const invoiceBillingAddress = getInvoiceAddress('billing');
+    const contactAddress = getContactAddress();
+    
+    console.log(`🏠 Address extraction results:`);
+    console.log(`   📦 Invoice shipping:`, invoiceShippingAddress);
+    console.log(`   💰 Invoice billing:`, invoiceBillingAddress);
+    console.log(`   👤 Contact address:`, contactAddress);
+    
+    // Build final addresses with fallback logic
+    // Priority: Invoice-specific address → Other invoice address → Contact address
+    const shippingAddress = invoiceShippingAddress || invoiceBillingAddress || contactAddress;
+    const billingAddress = invoiceBillingAddress || invoiceShippingAddress || contactAddress;
+    
+    console.log(`🏠 Final addresses:`);
+    console.log(`   📦 Shipping:`, shippingAddress);
+    console.log(`   💰 Billing:`, billingAddress);
 
     // Create order via Shopify REST API
     const orderData = {
       order: {
         line_items: shopifyLineItems,
         customer: customer,
-        billing_address: address,
-        shipping_address: address,
+        billing_address: billingAddress,
+        shipping_address: shippingAddress,
         financial_status: 'paid', // Mark as paid by default as requested
         tags: ['hubspot-import', `hubspot-deal-${dealId}`],
         note: `Imported from HubSpot Deal: ${deal.properties.dealname || dealId}\nDeal ID: ${dealId}\nOriginal Amount: $${deal.properties.amount || '0'}${invoiceInfo ? `\nInvoice: ${invoiceInfo.number}` : ''}`,
