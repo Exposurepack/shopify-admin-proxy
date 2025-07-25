@@ -1175,19 +1175,67 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Extract address information from multiple sources
     console.log(`🏠 Extracting address information...`);
     console.log(`📋 Contact properties:`, contactProps);
+    console.log(`🔍 Contact properties with address info:`, 
+      Object.keys(contactProps).filter(key => 
+        key.toLowerCase().includes('address') || 
+        key.toLowerCase().includes('street') ||
+        key.toLowerCase().includes('city') ||
+        key.toLowerCase().includes('state') ||
+        key.toLowerCase().includes('zip') ||
+        key.toLowerCase().includes('country')
+      )
+    );
     console.log(`📋 Invoice info:`, invoiceInfo);
+    
+    // Debug: Log all available invoice properties to see what address fields exist
+    if (invoiceInfo && invoiceInfo.properties) {
+      console.log(`🔍 All invoice properties available:`, Object.keys(invoiceInfo.properties));
+      console.log(`🔍 Invoice properties with 'address' in name:`, 
+        Object.keys(invoiceInfo.properties).filter(key => 
+          key.toLowerCase().includes('address') || 
+          key.toLowerCase().includes('street') ||
+          key.toLowerCase().includes('city') ||
+          key.toLowerCase().includes('state') ||
+          key.toLowerCase().includes('zip') ||
+          key.toLowerCase().includes('ship') ||
+          key.toLowerCase().includes('bill')
+        )
+      );
+      console.log(`🔍 Full invoice properties object:`, JSON.stringify(invoiceInfo.properties, null, 2));
+    }
     
     // Helper function to extract address from contact properties
     const getContactAddress = () => {
+      // Try multiple field name variations that HubSpot uses
+      const address1 = contactProps.address || contactProps.street || contactProps.address1 || 
+                       contactProps.street_address || contactProps.mailing_address || 
+                       contactProps.billing_address || contactProps.shipping_address || '';
+      
+      const city = contactProps.city || contactProps.mailing_city || 
+                   contactProps.billing_city || contactProps.shipping_city || '';
+      
+      const state = contactProps.state || contactProps.province || contactProps.region ||
+                    contactProps.mailing_state || contactProps.billing_state || 
+                    contactProps.shipping_state || '';
+      
+      const country = contactProps.country || contactProps.mailing_country ||
+                      contactProps.billing_country || contactProps.shipping_country || 'Australia';
+      
+      const zip = contactProps.zip || contactProps.postal_code || contactProps.postcode ||
+                  contactProps.zipcode || contactProps.mailing_zip || 
+                  contactProps.billing_zip || contactProps.shipping_zip || '';
+      
+      console.log(`👤 Contact address extraction - address1: "${address1}", city: "${city}", state: "${state}", zip: "${zip}"`);
+      
       return {
         first_name: firstName,
         last_name: lastName,
         company: contactProps.company || '',
-        address1: contactProps.address || contactProps.street || '',
-        city: contactProps.city || '',
-        province: contactProps.state || contactProps.province || '',
-        country: contactProps.country || 'Australia',
-        zip: contactProps.zip || contactProps.postal_code || contactProps.postcode || '',
+        address1: address1,
+        city: city,
+        province: state,
+        country: country,
+        zip: zip,
         phone: formattedPhone
       };
     };
