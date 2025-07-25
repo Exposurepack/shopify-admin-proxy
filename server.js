@@ -1103,7 +1103,9 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       const props = item.properties;
       const originalQuantity = parseInt(props.quantity) || 1;
       const unitPrice = parseFloat(props.price) || 0;
-      const totalAmount = parseFloat(props.amount) || (unitPrice * originalQuantity) || 0;
+      // Fix: Only use fallback calculation if amount is not a valid number (including 0)
+      const parsedAmount = parseFloat(props.amount);
+      const totalAmount = !isNaN(parsedAmount) ? parsedAmount : (unitPrice * originalQuantity) || 0;
       
       const transformedItem = {
         title: `${props.name || 'HubSpot Invoice Item'}${originalQuantity > 1 ? ` (${originalQuantity.toLocaleString()} units)` : ''}`,
