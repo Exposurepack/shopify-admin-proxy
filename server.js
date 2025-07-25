@@ -530,20 +530,8 @@ class HubSpotClient {
         {
           headers: this.headers,
           params: {
-            properties: [
-              // Basic deal properties
-              'dealname', 'amount', 'dealstage', 'closedate', 'hs_object_id',
-              'notes_last_contacted', 'description', 'deal_currency_code',
-              'hs_deal_stage_probability', 'hubspot_owner_id',
-              // Address properties that might be on deals
-              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_country', 'shipping_zip',
-              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_country', 'billing_zip',
-              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_country', 'delivery_zip',
-              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_country', 'ship_to_zip',
-              'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_country', 'bill_to_zip',
-              // Custom address fields
-              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_country', 'customer_zip'
-            ].join(','),
+            // Request ALL deal properties to see what's available
+            properties: 'all',
             associations: 'contacts,line_items'
           },
           timeout: 30000
@@ -562,22 +550,8 @@ class HubSpotClient {
         {
           headers: this.headers,
           params: {
-            properties: [
-              // Basic contact info
-              'firstname', 'lastname', 'email', 'phone', 'company',
-              // Primary address fields (most common)
-              'address', 'city', 'state', 'zip', 'country',
-              // Alternative address field names that HubSpot commonly uses
-              'street', 'address1', 'address2', 'region', 'province', 'postal_code', 'postcode', 'zipcode',
-              // Mailing address variations
-              'mailing_address', 'mailing_street', 'mailing_city', 'mailing_state', 'mailing_country', 'mailing_zip',
-              // Physical/Street address variations
-              'street_address', 'street_address_2', 'physical_address',
-              // Business address variations
-              'business_address', 'business_street', 'business_city', 'business_state', 'business_country', 'business_zip',
-              // International variations
-              'addr1', 'addr2', 'locality', 'administrative_area'
-            ].join(',')
+            // Request ALL contact properties to see what's available
+            properties: 'all'
           },
           timeout: 30000
         }
@@ -612,28 +586,14 @@ class HubSpotClient {
       const invoiceId = response.data.results[0].id;
       console.log(`📄 Processing invoice ID: ${invoiceId}`);
       
-      // Fetch detailed invoice data including line items, tax, and address info
+      // Fetch ALL invoice properties to see what's actually available
       const invoiceResponse = await axios.get(
         `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
         {
           headers: this.headers,
           params: {
-            // Request specific properties including address fields
-            properties: [
-              'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id',
-              'hs_tax_amount', 'hs_subtotal_amount', 'hs_total_amount', 'hs_discount_amount',
-              'hs_invoice_number', 'hs_status',
-              // Billing address fields
-              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_province',
-              'billing_country', 'billing_zip', 'billing_postal_code', 'billing_company',
-              'bill_to_address1', 'bill_to_city', 'bill_to_state', 'bill_to_country', 'bill_to_zip', 'bill_to_company',
-              // Shipping address fields  
-              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_province',
-              'shipping_country', 'shipping_zip', 'shipping_postal_code', 'shipping_company',
-              'ship_to_address1', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_country', 'ship_to_zip', 'ship_to_company',
-              // Alternative address field patterns
-              'address', 'street', 'city', 'state', 'country', 'zip', 'postal_code'
-            ],
+            // Request ALL properties to see what HubSpot actually stores
+            properties: 'all',
             associations: 'line_items'
           }
         }
