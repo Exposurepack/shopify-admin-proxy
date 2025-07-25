@@ -1470,31 +1470,41 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
 
     console.log(`✅ Successfully created Shopify order: ${createdOrder.name} (ID: ${createdOrder.id})`);
 
-    // Add additional metafields for tracking
+    // Add additional metafields for tracking (with safety checks for blank values)
     const orderGID = `gid://shopify/Order/${createdOrder.id}`;
-    await metafieldManager.setMetafield(
-      orderGID,
-      'hubspot',
-      'deal_id',
-      dealId,
-      'single_line_text_field'
-    );
+    
+    // Only set metafields if we have valid values
+    if (dealId) {
+      await metafieldManager.setMetafield(
+        orderGID,
+        'hubspot',
+        'deal_id',
+        dealId.toString(),
+        'single_line_text_field'
+      );
+    }
 
-    await metafieldManager.setMetafield(
-      orderGID,
-      'hubspot',
-      'deal_name',
-      deal.properties.dealname || '',
-      'single_line_text_field'
-    );
+    const dealName = deal.properties.dealname || deal.properties.deal_name || `Deal ${dealId}`;
+    if (dealName && dealName.trim() !== '') {
+      await metafieldManager.setMetafield(
+        orderGID,
+        'hubspot',
+        'deal_name',
+        dealName.trim(),
+        'single_line_text_field'
+      );
+    }
 
-    await metafieldManager.setMetafield(
-      orderGID,
-      'hubspot',
-      'original_amount',
-      deal.properties.amount || '0',
-      'number_decimal'
-    );
+    const dealAmount = deal.properties.amount || deal.properties.deal_amount || '0';
+    if (dealAmount && dealAmount !== '') {
+      await metafieldManager.setMetafield(
+        orderGID,
+        'hubspot',
+        'original_amount',
+        dealAmount.toString(),
+        'number_decimal'
+      );
+    }
 
     console.log(`📝 Added HubSpot tracking metafields to order ${createdOrder.name}`);
 
