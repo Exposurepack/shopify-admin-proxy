@@ -1203,9 +1203,38 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       console.log(`⚠️ No tax information found in invoice data`);
     }
 
-    // Create the order using REST API
-    const response = await restClient.post('/orders.json', orderData);
-    const createdOrder = response.order;
+    // Log the complete order data being sent to Shopify for debugging
+    console.log(`🔍 Complete Shopify order payload:`, JSON.stringify(orderData, null, 2));
+
+    let createdOrder;
+    try {
+      // Create the order using REST API
+      const response = await restClient.post('/orders.json', orderData);
+      createdOrder = response.order;
+    } catch (shopifyError) {
+      console.error(`❌ Shopify order creation failed:`, shopifyError.message);
+      
+      if (shopifyError.response) {
+        console.error(`📊 Shopify Error Status:`, shopifyError.response.status);
+        console.error(`📋 Shopify Error Headers:`, shopifyError.response.headers);
+        console.error(`📄 Shopify Error Body:`, shopifyError.response.body || shopifyError.response.data);
+        
+        // Try to extract specific validation errors
+        const errorBody = shopifyError.response.body || shopifyError.response.data;
+        if (errorBody && errorBody.errors) {
+          console.error(`🚨 Specific Shopify validation errors:`);
+          if (typeof errorBody.errors === 'object') {
+            Object.entries(errorBody.errors).forEach(([field, messages]) => {
+              console.error(`   - ${field}: ${Array.isArray(messages) ? messages.join(', ') : messages}`);
+            });
+          } else {
+            console.error(`   - ${errorBody.errors}`);
+          }
+        }
+      }
+      
+      throw shopifyError;
+    }
 
     console.log(`✅ Successfully created Shopify order: ${createdOrder.name} (ID: ${createdOrder.id})`);
 
@@ -1569,6 +1598,10 @@ app.post("/fulfillments", authenticate, async (req, res) => {
       }
     }
 
+    // Add improved line item handling - fulfill entire order if no specific line items
+    console.log(`📋 Creating fulfillment for entire order (no line item restrictions)`);
+    // Don't specify line_items to fulfill the entire order
+
     console.log(`🔍 Making Shopify REST API call:`);
     console.log(`📍 URL: /orders/${numericOrderId}/fulfillments.json`);
     console.log(`🔐 Using API version: ${SHOPIFY_API_VERSION}`);
@@ -1644,12 +1677,12 @@ app.post("/fulfillments", authenticate, async (req, res) => {
 });
 
 /**
- * Fulfillment endpoint using GraphQL fulfillmentCreateV2 mutation
- * More reliable than REST API for complex orders
+ * Fulfillment endpoint using Shopify REST API
+ * Uses REST API to avoid GraphQL permission issues on Grow plan
  */
 app.post("/fulfillments/v2", authenticate, async (req, res) => {
   console.log("🚚 ===============================================");
-  console.log("🚚 Creating fulfillment via GraphQL fulfillmentCreateV2");
+  console.log("🚚 Creating fulfillment via Shopify REST API");
 
   try {
     const { orderId, trackingCompany, trackingNumber, notifyCustomer = true } = req.body;
@@ -1667,94 +1700,9 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     // Extract numeric order ID from GID
     const numericOrderId = orderId.toString().replace(/^gid:\/\/shopify\/Order\//, '');
     console.log(`🔢 Numeric Order ID: ${numericOrderId}`);
-    
-    // Quick validation: check if this matches the order being dispatched
-    console.log(`⚠️ VERIFY: Is this the correct order? Check that ${numericOrderId} matches the order you're dispatching`);
 
-    // First get fulfillment orders for this order
-    console.log(`🔍 Fetching fulfillment orders for order ${numericOrderId}...`);
-    
-    const fulfillmentOrdersQuery = `
-      query getFulfillmentOrders($orderId: ID!) {
-        order(id: $orderId) {
-          id
-          name
-          fulfillmentOrders(first: 10) {
-            edges {
-              node {
-                id
-                status
-                requestStatus
-                fulfillments(first: 5) {
-                  edges {
-                    node {
-                      id
-                      status
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    console.log(`🔍 GraphQL query variables:`, { orderId });
-    console.log(`🔍 GraphQL query:`, fulfillmentOrdersQuery);
-
-    let fulfillmentOrdersResponse;
-    try {
-      fulfillmentOrdersResponse = await graphqlClient.query(fulfillmentOrdersQuery, {
-        orderId: orderId
-      });
-    } catch (graphqlError) {
-      console.error(`❌ GraphQL query failed:`, graphqlError);
-      console.error(`❌ GraphQL error details:`, graphqlError.response?.data || graphqlError.message);
-      throw new Error(`Failed to fetch fulfillment orders: ${graphqlError.message}`);
-    }
-
-    console.log(`📋 Fulfillment orders response:`, JSON.stringify(fulfillmentOrdersResponse, null, 2));
-
-    if (fulfillmentOrdersResponse.errors) {
-      throw new Error(`GraphQL error fetching fulfillment orders: ${fulfillmentOrdersResponse.errors.map(e => e.message).join(', ')}`);
-    }
-
-    const order = fulfillmentOrdersResponse.order;
-    if (!order) {
-      throw new Error(`Order not found: ${orderId}`);
-    }
-
-    const fulfillmentOrders = order.fulfillmentOrders.edges.map(edge => edge.node);
-    console.log(`📦 Found ${fulfillmentOrders.length} fulfillment orders`);
-
-    if (fulfillmentOrders.length === 0) {
-      throw new Error(`No fulfillment orders found for order ${orderId}`);
-    }
-
-    // Log fulfillment order details for debugging
-    fulfillmentOrders.forEach((fo, index) => {
-      console.log(`📋 Fulfillment Order ${index + 1}:`, {
-        id: fo.id,
-        status: fo.status,
-        requestStatus: fo.requestStatus,
-        existingFulfillments: fo.fulfillments?.edges?.length || 0
-      });
-    });
-
-    // Find unfulfilled fulfillment orders
-    const unfulfillmentOrders = fulfillmentOrders.filter(fo => 
-      fo.status === 'OPEN' || fo.status === 'IN_PROGRESS'
-    );
-
-    console.log(`🔍 Found ${unfulfillmentOrders.length} unfulfilled fulfillment orders out of ${fulfillmentOrders.length} total`);
-
-    if (unfulfillmentOrders.length === 0) {
-      throw new Error(`No unfulfilled items found for order ${orderId}. All fulfillment orders have status: ${fulfillmentOrders.map(fo => fo.status).join(', ')}`);
-    }
-
-    // Get locations to find the first available location
-    console.log(`🏪 Getting store locations...`);
+    // Get the first available location
+    console.log(`🏪 Getting store locations to set location_id...`);
     const locationsResponse = await restClient.get('/locations.json');
     const locations = locationsResponse.locations || [];
     
@@ -1762,79 +1710,65 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       throw new Error('No locations found in store');
     }
 
-    const locationId = `gid://shopify/Location/${locations[0].id}`;
-    console.log(`📍 Using location: ${locationId} (${locations[0].name || 'Default'})`);
+    const locationId = locations[0].id;
+    console.log(`📍 Using location_id: ${locationId} (${locations[0].name || 'Default'})`);
 
-    // Create fulfillment using GraphQL fulfillmentCreateV2
-    const fulfillmentMutation = `
-      mutation fulfillmentCreateV2($input: FulfillmentCreateV2Input!) {
-        fulfillmentCreateV2(input: $input) {
-          fulfillment {
-            id
-            status
-            trackingInfo {
-              company
-              number
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
+    // Pre-check: Verify order exists and is fulfillable
+    console.log(`🔍 Fetching order details for pre-check...`);
+    try {
+      const orderCheckResponse = await restClient.get(`/orders/${numericOrderId}.json`);
+      const orderDetails = orderCheckResponse.order;
+      
+      console.log(`📋 Order Status Check:`);
+      console.log(`   💰 Financial Status: ${orderDetails.financial_status}`);
+      console.log(`   📦 Fulfillment Status: ${orderDetails.fulfillment_status || 'unfulfilled'}`);
+      console.log(`   🏷️ Tags: ${orderDetails.tags || 'none'}`);
+      console.log(`   📅 Created: ${orderDetails.created_at}`);
+      console.log(`   📝 Line Items: ${orderDetails.line_items?.length || 0}`);
+
+      if (orderDetails.financial_status?.toLowerCase() !== 'paid') {
+        throw new Error(`Order must be paid before fulfillment. Current status: ${orderDetails.financial_status}`);
       }
-    `;
 
-    const mutationInput = {
-      input: {
-        fulfillment: {
-          locationId: locationId,
-          trackingInfo: {
-            company: trackingCompany,
-            number: trackingNumber
-          },
-          notifyCustomer: notifyCustomer,
-          lineItemsByFulfillmentOrder: unfulfillmentOrders.map(fo => ({
-            fulfillmentOrderId: fo.id
-          }))
-        }
+      if (orderDetails.fulfillment_status?.toLowerCase() === 'fulfilled') {
+        throw new Error(`Order is already fully fulfilled.`);
+      }
+
+      console.log(`✅ Order appears fulfillable, proceeding with fulfillment creation...`);
+      
+    } catch (orderFetchError) {
+      console.error(`⚠️ Could not fetch order details for pre-check:`, orderFetchError.message);
+      console.log(`🔄 Proceeding with fulfillment anyway...`);
+    }
+
+    // Create fulfillment payload
+    const fulfillmentPayload = {
+      fulfillment: {
+        location_id: locationId,
+        tracking_number: trackingNumber,
+        tracking_company: trackingCompany,
+        notify_customer: notifyCustomer
       }
     };
 
-    console.log(`🔄 Creating fulfillment with input:`, JSON.stringify(mutationInput, null, 2));
+    console.log(`🔍 Making Shopify REST API call:`);
+    console.log(`📍 URL: /orders/${numericOrderId}/fulfillments.json`);
+    console.log(`🔐 Using API version: ${SHOPIFY_API_VERSION}`);
+    console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
+    console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentPayload, null, 2));
 
-    let fulfillmentResponse;
-    try {
-      fulfillmentResponse = await graphqlClient.query(fulfillmentMutation, mutationInput);
-    } catch (mutationError) {
-      console.error(`❌ Fulfillment mutation failed:`, mutationError);
-      console.error(`❌ Mutation error details:`, mutationError.response?.data || mutationError.message);
-      throw new Error(`Failed to create fulfillment: ${mutationError.message}`);
-    }
+    // Create fulfillment using Shopify REST API
+    const fulfillmentResponse = await restClient.post(
+      `/orders/${numericOrderId}/fulfillments.json`,
+      fulfillmentPayload
+    );
 
-    console.log(`✅ Fulfillment response:`, JSON.stringify(fulfillmentResponse, null, 2));
-
-    if (fulfillmentResponse.errors) {
-      throw new Error(`GraphQL error creating fulfillment: ${fulfillmentResponse.errors.map(e => e.message).join(', ')}`);
-    }
-
-    const result = fulfillmentResponse.data.fulfillmentCreateV2;
-    
-    if (result.userErrors && result.userErrors.length > 0) {
-      const errorMessages = result.userErrors.map(err => `${err.field}: ${err.message}`).join(', ');
-      throw new Error(`Fulfillment validation errors: ${errorMessages}`);
-    }
-
-    if (!result.fulfillment) {
-      throw new Error('Fulfillment creation failed - no fulfillment returned');
-    }
-
-    console.log(`✅ Fulfillment created successfully: ${result.fulfillment.id}`);
+    console.log(`✅ Fulfillment created successfully:`, fulfillmentResponse);
 
     res.json({
       success: true,
-      fulfillment: result.fulfillment,
-      message: "Fulfillment created successfully via GraphQL v2",
+      fulfillment: fulfillmentResponse,
+      message: "Fulfillment created successfully via REST API",
       trackingNumber: trackingNumber,
       trackingCompany: trackingCompany
     });
@@ -1851,6 +1785,30 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       console.error("📊 Status:", error.response.status || error.response.statusCode);
       console.error("📋 Headers:", error.response.headers);
       console.error("📄 Body:", error.response.body || error.response.data);
+      
+      // Avoid circular reference error when logging response
+      try {
+        const responseForLogging = {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          headers: error.response.headers,
+          data: error.response.data
+        };
+        console.error("🔍 Full Response:", JSON.stringify(responseForLogging, null, 2));
+      } catch (circularError) {
+        console.error("⚠️ Response contains circular references, skipping full log");
+      }
+      
+      // Special handling for 406 errors
+      if (error.response.status === 406 || error.response.statusCode === 406) {
+        console.error("🚨 406 NOT ACCEPTABLE - Common causes:");
+        console.error("   - Order not fulfillable (already fulfilled, cancelled, etc.)");
+        console.error("   - Line items already fulfilled or invalid");
+        console.error("   - Inventory tracking issues");
+        console.error("   - API version compatibility");
+        console.error("   - Missing required fields");
+        console.error("💡 Check: order fulfillment status, location_id, and line item availability");
+      }
       
       return res.status(error.response.statusCode || error.response.status || 500).json({
         error: "Shopify API Error",
