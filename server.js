@@ -531,16 +531,18 @@ class HubSpotClient {
           headers: this.headers,
           params: {
             properties: [
-              'dealname',
-              'amount',
-              'dealstage',
-              'closedate',
-              'hs_object_id',
-              'notes_last_contacted',
-              'description',
-              'deal_currency_code',
-              'hs_deal_stage_probability',
-              'hubspot_owner_id'
+              // Basic deal properties
+              'dealname', 'amount', 'dealstage', 'closedate', 'hs_object_id',
+              'notes_last_contacted', 'description', 'deal_currency_code',
+              'hs_deal_stage_probability', 'hubspot_owner_id',
+              // Address properties that might be on deals
+              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_country', 'shipping_zip',
+              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_country', 'billing_zip',
+              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_country', 'delivery_zip',
+              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_country', 'ship_to_zip',
+              'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_country', 'bill_to_zip',
+              // Custom address fields
+              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_country', 'customer_zip'
             ].join(','),
             associations: 'contacts,line_items'
           },
@@ -561,16 +563,20 @@ class HubSpotClient {
           headers: this.headers,
           params: {
             properties: [
-              'firstname',
-              'lastname',
-              'email',
-              'phone',
-              'company',
-              'address',
-              'city',
-              'state',
-              'zip',
-              'country'
+              // Basic contact info
+              'firstname', 'lastname', 'email', 'phone', 'company',
+              // Primary address fields (most common)
+              'address', 'city', 'state', 'zip', 'country',
+              // Alternative address field names that HubSpot commonly uses
+              'street', 'address1', 'address2', 'region', 'province', 'postal_code', 'postcode', 'zipcode',
+              // Mailing address variations
+              'mailing_address', 'mailing_street', 'mailing_city', 'mailing_state', 'mailing_country', 'mailing_zip',
+              // Physical/Street address variations
+              'street_address', 'street_address_2', 'physical_address',
+              // Business address variations
+              'business_address', 'business_street', 'business_city', 'business_state', 'business_country', 'business_zip',
+              // International variations
+              'addr1', 'addr2', 'locality', 'administrative_area'
             ].join(',')
           },
           timeout: 30000
@@ -1174,6 +1180,19 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
 
     // Extract address information from multiple sources
     console.log(`🏠 Extracting address information...`);
+    console.log(`📋 Deal properties:`, deal.properties);
+    console.log(`🔍 Deal properties with address info:`, 
+      Object.keys(deal.properties).filter(key => 
+        key.toLowerCase().includes('address') || 
+        key.toLowerCase().includes('street') ||
+        key.toLowerCase().includes('city') ||
+        key.toLowerCase().includes('state') ||
+        key.toLowerCase().includes('zip') ||
+        key.toLowerCase().includes('ship') ||
+        key.toLowerCase().includes('bill') ||
+        key.toLowerCase().includes('delivery')
+      )
+    );
     console.log(`📋 Contact properties:`, contactProps);
     console.log(`🔍 Contact properties with address info:`, 
       Object.keys(contactProps).filter(key => 
@@ -1204,6 +1223,57 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       console.log(`🔍 Full invoice properties object:`, JSON.stringify(invoiceInfo.properties, null, 2));
     }
     
+    // Helper function to extract address from deal properties
+    const getDealAddress = (type = 'shipping') => {
+      const props = deal.properties;
+      console.log(`🏢 Looking for ${type} address in deal properties:`, Object.keys(props));
+      
+      // Common deal address field patterns
+      const addressFields = {
+        billing: {
+          address1: props.billing_address || props.billing_street || props.bill_to_address || props.bill_to_street || '',
+          city: props.billing_city || props.bill_to_city || '',
+          province: props.billing_state || props.billing_province || props.bill_to_state || '',
+          country: props.billing_country || props.bill_to_country || 'Australia',
+          zip: props.billing_zip || props.billing_postal_code || props.bill_to_zip || '',
+          company: props.billing_company || props.bill_to_company || contactProps.company || ''
+        },
+        shipping: {
+          address1: props.shipping_address || props.shipping_street || props.ship_to_address || props.ship_to_street ||
+                   props.delivery_address || props.delivery_street || props.customer_address || props.customer_street || '',
+          city: props.shipping_city || props.ship_to_city || props.delivery_city || props.customer_city || '',
+          province: props.shipping_state || props.shipping_province || props.ship_to_state || 
+                   props.delivery_state || props.customer_state || '',
+          country: props.shipping_country || props.ship_to_country || props.delivery_country || 
+                  props.customer_country || 'Australia',
+          zip: props.shipping_zip || props.shipping_postal_code || props.ship_to_zip || 
+              props.delivery_zip || props.customer_zip || '',
+          company: props.shipping_company || props.ship_to_company || props.delivery_company || 
+                  props.customer_company || contactProps.company || ''
+        }
+      };
+      
+      const addressData = addressFields[type];
+      
+      // Only return if we have at least address1 or city
+      if (addressData.address1 || addressData.city) {
+        console.log(`🏢 Found ${type} address in deal:`, addressData);
+        return {
+          first_name: firstName,
+          last_name: lastName,
+          company: addressData.company,
+          address1: addressData.address1,
+          city: addressData.city,
+          province: addressData.province,
+          country: addressData.country,
+          zip: addressData.zip,
+          phone: formattedPhone
+        };
+      }
+      
+      return null;
+    };
+
     // Helper function to extract address from contact properties
     const getContactAddress = () => {
       // Try multiple field name variations that HubSpot uses
@@ -1287,20 +1357,26 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       return null;
     };
     
-    // Try to get specific addresses, with fallbacks
+    // Try to get specific addresses from all sources, with fallbacks
+    const dealShippingAddress = getDealAddress('shipping');
+    const dealBillingAddress = getDealAddress('billing');
     const invoiceShippingAddress = getInvoiceAddress('shipping');
     const invoiceBillingAddress = getInvoiceAddress('billing');
     const contactAddress = getContactAddress();
     
     console.log(`🏠 Address extraction results:`);
+    console.log(`   🏢 Deal shipping:`, dealShippingAddress);
+    console.log(`   🏢 Deal billing:`, dealBillingAddress);
     console.log(`   📦 Invoice shipping:`, invoiceShippingAddress);
     console.log(`   💰 Invoice billing:`, invoiceBillingAddress);
     console.log(`   👤 Contact address:`, contactAddress);
     
-    // Build final addresses with fallback logic
-    // Priority: Invoice-specific address → Other invoice address → Contact address
-    const shippingAddress = invoiceShippingAddress || invoiceBillingAddress || contactAddress;
-    const billingAddress = invoiceBillingAddress || invoiceShippingAddress || contactAddress;
+    // Build final addresses with comprehensive fallback logic
+    // Priority: Deal address → Invoice address → Contact address → Other type
+    const shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
+                           invoiceBillingAddress || contactAddress;
+    const billingAddress = dealBillingAddress || invoiceBillingAddress || dealShippingAddress || 
+                          invoiceShippingAddress || contactAddress;
     
     console.log(`🏠 Final addresses:`);
     console.log(`   📦 Shipping:`, shippingAddress);
