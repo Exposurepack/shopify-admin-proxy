@@ -1373,12 +1373,26 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`   💰 Invoice billing:`, invoiceBillingAddress);
     console.log(`   👤 Contact address:`, contactAddress);
     
-    // Build final addresses with comprehensive fallback logic
+    // Build final addresses with proper fallback logic
     // Priority: Deal address → Invoice address → Contact address → Manual entry
+    // IMPORTANT: If shipping isn't available, fall back to billing address
     let shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
                          invoiceBillingAddress || contactAddress;
-    let billingAddress = dealBillingAddress || invoiceBillingAddress || dealShippingAddress || 
-                        invoiceShippingAddress || contactAddress;
+    let billingAddress = dealBillingAddress || invoiceBillingAddress || contactAddress;
+    
+    // If we still don't have addresses, ensure both billing and shipping use the same contact address
+    if (!shippingAddress && !billingAddress && contactAddress) {
+      console.log(`⚠️ No specific address data found, using contact address for both shipping and billing`);
+      shippingAddress = contactAddress;
+      billingAddress = contactAddress;
+    }
+    
+    // Final validation - ensure we have addresses
+    if (!shippingAddress || !billingAddress) {
+      console.log(`🚨 WARNING: Missing address data after all fallbacks`);
+      console.log(`   📦 Shipping address: ${!!shippingAddress}`);
+      console.log(`   💰 Billing address: ${!!billingAddress}`);
+    }
     
     // Manual address database for known customers (temporary solution)
     // TODO: Remove this when HubSpot properly stores address data
@@ -1434,9 +1448,19 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       console.log(`📝 Consider adding address manually to knownAddresses database`);
     }
     
+    // Log address source information for debugging
+    const getAddressSource = (address, isShipping = false) => {
+      if (address === dealShippingAddress) return 'Deal Shipping';
+      if (address === dealBillingAddress) return isShipping ? 'Deal Billing (fallback)' : 'Deal Billing';  
+      if (address === invoiceShippingAddress) return 'Invoice Shipping';
+      if (address === invoiceBillingAddress) return isShipping ? 'Invoice Billing (fallback)' : 'Invoice Billing';
+      if (address === contactAddress) return 'Contact';
+      return 'Manual Override';
+    };
+    
     console.log(`🏠 Final addresses:`);
-    console.log(`   📦 Shipping:`, shippingAddress);
-    console.log(`   💰 Billing:`, billingAddress);
+    console.log(`   📦 Shipping: ${getAddressSource(shippingAddress, true)} ->`, shippingAddress);
+    console.log(`   💰 Billing: ${getAddressSource(billingAddress, false)} ->`, billingAddress);
 
     // Create order via Shopify REST API
     const orderData = {
