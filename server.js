@@ -929,56 +929,6 @@ class HubSpotClient {
       // Don't throw error - association failure shouldn't break the whole flow
     }
   }
-
-  async getAllDeals() {
-    try {
-      console.log(`📊 Fetching all HubSpot deals for analytics...`);
-      
-      let allDeals = [];
-      let after = null;
-      let hasMore = true;
-      
-      while (hasMore) {
-        const params = {
-          properties: [
-            'dealname', 'amount', 'dealstage', 'closedate', 'hs_object_id',
-            'deal_currency_code', 'hs_deal_stage_probability', 'createdate'
-          ].join(','),
-          limit: 100
-        };
-        
-        if (after) {
-          params.after = after;
-        }
-        
-        const response = await axios.get(
-          `${this.baseURL}/crm/v3/objects/deals`,
-          {
-            headers: this.headers,
-            params,
-            timeout: 30000
-          }
-        );
-        
-        allDeals.push(...response.data.results);
-        
-        if (response.data.paging?.next?.after) {
-          after = response.data.paging.next.after;
-        } else {
-          hasMore = false;
-        }
-        
-        console.log(`📊 Fetched ${response.data.results.length} deals, total: ${allDeals.length}`);
-      }
-      
-      console.log(`✅ Fetched total of ${allDeals.length} deals from HubSpot`);
-      return allDeals;
-      
-    } catch (error) {
-      console.error(`❌ Failed to fetch HubSpot deals:`, error.response?.data?.message || error.message);
-      throw error;
-    }
-  }
 }
 
 /**
@@ -2821,44 +2771,11 @@ app.get("/rest/orders/:id", async (req, res) => {
 
 app.get("/rest/locations", async (req, res) => {
   try {
-    const locationMapping = await fetchLocationDetails();
-    return res.json(locationMapping);
+    console.log("🔄 REST: fetching locations");
+    const locationsData = await restClient.get("/locations.json");
+    res.json(locationsData);
   } catch (error) {
-    console.error("❌ Error fetching locations:", error);
-    return res.status(500).json({ error: "Failed to fetch locations" });
-  }
-});
-
-// HubSpot deals API endpoint for analytics
-app.get("/api/hubspot-deals", async (req, res) => {
-  try {
-    if (!HUBSPOT_PRIVATE_APP_TOKEN) {
-      console.warn('⚠️ HubSpot API token not configured - returning empty array');
-      return res.json([]);
-    }
-
-    const hubspotClient = new HubSpotClient();
-    const deals = await hubspotClient.getAllDeals();
-    
-    // Transform deals data for frontend
-    const transformedDeals = deals.map(deal => ({
-      id: deal.id,
-      dealname: deal.properties.dealname || 'Untitled Deal',
-      amount: parseFloat(deal.properties.amount) || 0,
-      dealstage: deal.properties.dealstage || '',
-      closedate: deal.properties.closedate || deal.properties.createdate,
-      createdate: deal.properties.createdate,
-      currency: deal.properties.deal_currency_code || 'AUD'
-    }));
-
-    console.log(`✅ Served ${transformedDeals.length} HubSpot deals for analytics`);
-    res.json(transformedDeals);
-
-  } catch (error) {
-    console.error('❌ Error fetching HubSpot deals for analytics:', error);
-    
-    // Return empty array so frontend falls back to hardcoded data
-    res.json([]);
+    handleError(error, res, "REST locations fetch failed");
   }
 });
 
