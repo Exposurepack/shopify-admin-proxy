@@ -890,6 +890,45 @@ class HubSpotClient {
       // Don't throw error - association failure shouldn't break the whole flow
     }
   }
+
+  async createLineItem(lineItemData) {
+    try {
+      console.log(`📝 Creating line item: ${lineItemData.name}`);
+      
+      const response = await axios.post(
+        `${this.baseURL}/crm/v3/objects/line_items`,
+        { properties: lineItemData },
+        { headers: this.headers }
+      );
+
+      console.log(`✅ Created line item: ${response.data.id} - ${lineItemData.name}`);
+      return response.data;
+
+    } catch (error) {
+      console.error(`❌ Failed to create line item:`, error.response?.data?.message || error.message);
+      throw error;
+    }
+  }
+
+  async associateLineItemWithDeal(lineItemId, dealId) {
+    try {
+      console.log(`🔗 Associating line item ${lineItemId} with deal ${dealId}`);
+      
+      // Association type 20 is for line_items to deals
+      const response = await axios.put(
+        `${this.baseURL}/crm/v3/objects/line_items/${lineItemId}/associations/deals/${dealId}/20`,
+        {},
+        { headers: this.headers }
+      );
+
+      console.log(`✅ Associated line item with deal successfully`);
+      return response.data;
+
+    } catch (error) {
+      console.warn(`⚠️ Failed to associate line item with deal:`, error.response?.data?.message || error.message);
+      // Don't throw error - association failure shouldn't break the whole flow
+    }
+  }
 }
 
 /**
@@ -1009,10 +1048,17 @@ async function createHubSpotDealFromShopifyOrder(order) {
       // Additional info
       hs_deal_currency_code: currency,
       deal_source: 'Shopify',
-      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nItems: ${order.line_items?.length || 0}\nCustomer: ${customer.email || 'N/A'}`
+      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nItems: ${order.line_items?.length || 0}\nCustomer: ${customer.email || 'N/A'}${order.line_items?.length > 0 ? `\n\nLine Items:\n${order.line_items.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}`
     };
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${dealAmount} ${currency}`);
+    console.log(`📊 Deal summary: ${order.line_items?.length || 0} line items, Total: $${dealAmount}`);
+    if (order.line_items && order.line_items.length > 0) {
+      console.log(`📝 Line items preview:`);
+      order.line_items.forEach((item, i) => {
+        console.log(`   ${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`);
+      });
+    }
 
     // Create deal in HubSpot
     const deal = await hubspotClient.createDeal(dealData);
@@ -1021,6 +1067,49 @@ async function createHubSpotDealFromShopifyOrder(order) {
     // Associate contact with deal if both exist
     if (contact && deal) {
       await hubspotClient.associateContactWithDeal(contact.id, deal.id);
+    }
+
+    // Create line items in HubSpot if order has line items
+    if (order.line_items && order.line_items.length > 0) {
+      console.log(`📝 Creating ${order.line_items.length} line items in HubSpot for deal ${deal.id}`);
+      
+      try {
+        for (let i = 0; i < order.line_items.length; i++) {
+          const shopifyLineItem = order.line_items[i];
+          
+          // Transform Shopify line item to HubSpot format
+          const hubspotLineItem = {
+            name: shopifyLineItem.title || shopifyLineItem.name || `Item ${i + 1}`,
+            quantity: parseInt(shopifyLineItem.quantity) || 1,
+            price: parseFloat(shopifyLineItem.price) || 0,
+            amount: parseFloat(shopifyLineItem.price) * (parseInt(shopifyLineItem.quantity) || 1),
+            hs_sku: shopifyLineItem.sku || shopifyLineItem.variant_id || `SHOPIFY-${shopifyLineItem.id}`,
+            description: `Shopify Line Item\nVariant ID: ${shopifyLineItem.variant_id || 'N/A'}\nProduct ID: ${shopifyLineItem.product_id || 'N/A'}${shopifyLineItem.variant_title ? `\nVariant: ${shopifyLineItem.variant_title}` : ''}`,
+            // Custom properties for Shopify data
+            shopify_line_item_id: shopifyLineItem.id,
+            shopify_product_id: shopifyLineItem.product_id,
+            shopify_variant_id: shopifyLineItem.variant_id
+          };
+
+          console.log(`📝 Creating line item: ${hubspotLineItem.name} (Qty: ${hubspotLineItem.quantity}, Price: $${hubspotLineItem.price})`);
+
+          // Create line item in HubSpot
+          const createdLineItem = await hubspotClient.createLineItem(hubspotLineItem);
+          
+          // Associate line item with deal
+          if (createdLineItem && createdLineItem.id) {
+            await hubspotClient.associateLineItemWithDeal(createdLineItem.id, deal.id);
+          }
+        }
+        
+        console.log(`✅ Successfully created all ${order.line_items.length} line items in HubSpot`);
+        
+      } catch (lineItemError) {
+        console.error(`❌ Error creating line items (continuing with deal creation):`, lineItemError.message);
+        // Don't throw error - line item creation failure shouldn't break the whole flow
+      }
+    } else {
+      console.log(`ℹ️ No line items found in Shopify order ${order.name}`);
     }
 
     console.log(`✅ Successfully created HubSpot deal from Shopify order ${order.name}`);
