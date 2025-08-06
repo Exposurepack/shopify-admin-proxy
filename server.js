@@ -68,7 +68,6 @@ const allowedOrigins = [
 const corsOptions = {
   origin: function (origin, callback) {
     console.log('🌐 CORS check for origin:', origin);
-    console.log('🌐 NODE_ENV:', NODE_ENV);
     
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
@@ -79,12 +78,6 @@ const corsOptions = {
     // In development, allow all origins
     if (NODE_ENV !== "production") {
       console.log('✅ CORS: Development mode - allowing all origins');
-      return callback(null, true);
-    }
-    
-    // TEMPORARY FIX: Allow exposurepack.com.au in production
-    if (origin && origin.includes('exposurepack.com.au')) {
-      console.log('✅ CORS: ExposurePack domain detected - allowing');
       return callback(null, true);
     }
     
@@ -103,43 +96,19 @@ const corsOptions = {
     });
     
     if (isAllowed) {
-      console.log('✅ CORS: Origin allowed via allowed origins list');
+      console.log('✅ CORS: Origin allowed');
       callback(null, true);
     } else {
       console.log('❌ CORS: Origin not allowed');
       console.log('📋 CORS: Allowed origins:', allowedOrigins);
-      console.log('📋 CORS: Received origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-API-Key'],
-  credentials: true,
-  optionsSuccessStatus: 200 // For legacy browser support
+  credentials: true
 };
 app.use(cors(corsOptions));
-
-// Additional CORS debugging - handle preflight requests manually if needed
-app.options('*', (req, res) => {
-  console.log('🔧 Manual OPTIONS preflight handler triggered');
-  console.log('🔧 Origin:', req.headers.origin);
-  console.log('🔧 Method:', req.headers['access-control-request-method']);
-  console.log('🔧 Headers:', req.headers['access-control-request-headers']);
-  
-  // Set CORS headers manually for ExposurePack domain
-  if (req.headers.origin && req.headers.origin.includes('exposurepack.com.au')) {
-    res.header('Access-Control-Allow-Origin', req.headers.origin);
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, X-API-Key');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '86400'); // 24 hours
-    console.log('✅ Manual CORS headers set for ExposurePack domain');
-    return res.status(200).end();
-  }
-  
-  console.log('⚠️ Manual OPTIONS handler - origin not recognized');
-  res.status(204).end();
-});
 
 // Body parsing with size limits
 app.use(express.json({ 
@@ -182,40 +151,13 @@ const authenticate = (req, res, next) => {
     return next();
   }
   
-  // TEMPORARY DEBUG: Allow fulfillment requests without auth to test
-  if (req.path === '/fulfillments/v2' && req.method === 'POST') {
-    console.log(`🔧 TEMPORARY: Bypassing auth for fulfillment endpoint`);
-    return next();
-  }
-  
-  // Debug: Log all headers for troubleshooting
-  console.log(`🔐 Authentication check for ${req.method} ${req.path}`);
-  console.log(`🔐 Request headers:`, Object.keys(req.headers).join(', '));
-  console.log(`🔐 x-api-key header:`, req.headers["x-api-key"]);
-  console.log(`🔐 X-API-Key header:`, req.headers["X-API-Key"]);
-  console.log(`🔐 authorization header:`, req.headers["authorization"]);
-  
-  // Try multiple header variations (case-insensitive)
-  const apiKey = req.headers["x-api-key"] || 
-                  req.headers["X-API-Key"] || 
-                  req.headers["X-Api-Key"] ||
-                  req.headers["x-API-key"] ||
-                  req.headers["authorization"];
-  
-  // Accept either the environment variable or the hardcoded key for backward compatibility
-  const validKeys = [FRONTEND_SECRET, 'mypassword123'].filter(Boolean);
-  if (!apiKey || !validKeys.includes(apiKey)) {
-    console.log(`❌ Authentication failed. Received: "${apiKey}", Expected one of:`, validKeys);
-    console.log(`❌ Available headers:`, JSON.stringify(req.headers, null, 2));
+  const apiKey = req.headers["x-api-key"];
+  if (!apiKey || apiKey !== FRONTEND_SECRET) {
     return res.status(401).json({ 
       error: "Unauthorized", 
-      message: "Valid API key required in x-api-key header",
-      receivedHeaders: Object.keys(req.headers),
-      debug: `Received API key: "${apiKey}"`
+      message: "Valid API key required in x-api-key header" 
     });
   }
-  
-  console.log(`✅ Authentication successful with key: "${apiKey}"`);
   next();
 };
 
@@ -2189,14 +2131,11 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     const locationId = locations[0].id;
     console.log(`📍 Using location_id: ${locationId} (${locations[0].name || 'Default'})`);
 
-    // Fetch order details to get line items for fulfillment
-    console.log(`🔍 Fetching order details to get line items...`);
-    let orderDetails;
-    let unfulfillableLineItems = [];
-    
+    // Pre-check: Verify order exists and is fulfillable
+    console.log(`🔍 Fetching order details for pre-check...`);
     try {
       const orderCheckResponse = await restClient.get(`/orders/${numericOrderId}.json`);
-      orderDetails = orderCheckResponse.order;
+      const orderDetails = orderCheckResponse.order;
       
       console.log(`📋 Order Status Check:`);
       console.log(`   💰 Financial Status: ${orderDetails.financial_status}`);
@@ -2213,46 +2152,20 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
         throw new Error(`Order is already fully fulfilled.`);
       }
 
-      // Get unfulfilled line items
-      unfulfillableLineItems = orderDetails.line_items.filter(item => {
-        const fulfilledQty = item.fulfilled_quantity || 0;
-        const totalQty = item.quantity || 0;
-        const canFulfill = totalQty > fulfilledQty;
-        
-        console.log(`   📦 Line Item ${item.id}: "${item.name}" - ${fulfilledQty}/${totalQty} fulfilled (can fulfill: ${canFulfill})`);
-        return canFulfill;
-      });
-
-      if (unfulfillableLineItems.length === 0) {
-        throw new Error('No unfulfilled line items found in this order');
-      }
-
-      console.log(`✅ Found ${unfulfillableLineItems.length} fulfillable line items, proceeding...`);
+      console.log(`✅ Order appears fulfillable, proceeding with fulfillment creation...`);
       
     } catch (orderFetchError) {
-      console.error(`❌ Could not fetch order details:`, orderFetchError.message);
-      throw new Error(`Unable to fetch order details: ${orderFetchError.message}`);
+      console.error(`⚠️ Could not fetch order details for pre-check:`, orderFetchError.message);
+      console.log(`🔄 Proceeding with fulfillment anyway...`);
     }
 
-    // Create line items array for fulfillment
-    const lineItems = unfulfillableLineItems.map(item => {
-      const remainingQty = (item.quantity || 0) - (item.fulfilled_quantity || 0);
-      console.log(`   📦 Adding line item ${item.id} with quantity ${remainingQty} to fulfillment`);
-      
-      return {
-        id: item.id,
-        quantity: remainingQty
-      };
-    });
-
-    // Create fulfillment payload with line items
+    // Create fulfillment payload
     const fulfillmentPayload = {
       fulfillment: {
         location_id: locationId,
         tracking_number: trackingNumber,
         tracking_company: trackingCompany,
-        notify_customer: notifyCustomer,
-        line_items: lineItems
+        notify_customer: notifyCustomer
       }
     };
 
@@ -2262,130 +2175,21 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
     console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentPayload, null, 2));
 
-    // Try multiple fulfillment strategies to overcome 406 errors
-    console.log(`🔄 Attempting multiple fulfillment strategies...`);
-    
-    // Strategy 1: Simplified fulfillment without line items (auto-fulfill all)
-    console.log(`📋 Strategy 1: Simplified fulfillment (auto-fulfill all unfulfilled items)`);
-    const simplifiedPayload = {
-      fulfillment: {
-        location_id: locationId,
-        tracking_number: trackingNumber,
-        tracking_company: trackingCompany,
-        notify_customer: notifyCustomer
-        // Note: No line_items specified - Shopify will fulfill all unfulfilled items
-      }
-    };
-    
-    try {
-      console.log(`🔗 Trying simplified payload:`, JSON.stringify(simplifiedPayload, null, 2));
-      
-      const simplifiedResponse = await axios.post(
-        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`,
-        simplifiedPayload,
-        {
-          headers: {
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-      
-      console.log(`✅ Simplified fulfillment successful:`, simplifiedResponse.data);
-      
-      return res.json({
-        success: true,
-        fulfillment: simplifiedResponse.data,
-        message: "Fulfillment created successfully via simplified method (2023-10)",
-        trackingNumber: trackingNumber,
-        trackingCompany: trackingCompany,
-        apiVersion: "2023-10",
-        method: "simplified"
-      });
-      
-    } catch (simplifiedError) {
-      console.error(`❌ Simplified method also failed:`, simplifiedError.response?.status, simplifiedError.response?.data);
-    }
-    
-    // Strategy 2: Try with 2024-01 API (stable version)
-    console.log(`📋 Strategy 2: Trying with API version 2024-01 (stable)`);
-    try {
-      const stableResponse = await axios.post(
-        `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${numericOrderId}/fulfillments.json`,
-        simplifiedPayload,
-        {
-          headers: {
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-      
-      console.log(`✅ 2024-01 API fulfillment successful:`, stableResponse.data);
-      
-      return res.json({
-        success: true,
-        fulfillment: stableResponse.data,
-        message: "Fulfillment created successfully via 2024-01 API",
-        trackingNumber: trackingNumber,
-        trackingCompany: trackingCompany,
-        apiVersion: "2024-01",
-        method: "stable"
-      });
-      
-    } catch (stableError) {
-      console.error(`❌ 2024-01 API also failed:`, stableError.response?.status, stableError.response?.data);
-    }
-    
-    // Strategy 3: Force fulfillment with minimum required fields only
-    console.log(`📋 Strategy 3: Minimal fulfillment (tracking only)`);
-    const minimalPayload = {
-      fulfillment: {
-        tracking_number: trackingNumber,
-        tracking_company: trackingCompany,
-        notify_customer: notifyCustomer
-        // Note: No location_id, no line_items - absolute minimum
-      }
-    };
-    
-    try {
-      console.log(`🔗 Trying minimal payload:`, JSON.stringify(minimalPayload, null, 2));
-      
-      const minimalResponse = await axios.post(
-        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`,
-        minimalPayload,
-        {
-          headers: {
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-      
-      console.log(`✅ Minimal fulfillment successful:`, minimalResponse.data);
-      
-      return res.json({
-        success: true,
-        fulfillment: minimalResponse.data,
-        message: "Fulfillment created successfully via minimal method",
-        trackingNumber: trackingNumber,
-        trackingCompany: trackingCompany,
-        apiVersion: "2023-10",
-        method: "minimal"
-      });
-      
-    } catch (minimalError) {
-      console.error(`❌ All fulfillment strategies failed:`);
-      console.error(`   - Simplified: ${simplifiedError?.response?.status}`);
-      console.error(`   - Stable API: ${stableError?.response?.status}`);
-      console.error(`   - Minimal: ${minimalError?.response?.status}`);
-      
-      // Re-throw the original error for the existing error handler
-      throw minimalError;
-    }
+    // Create fulfillment using Shopify REST API
+    const fulfillmentResponse = await restClient.post(
+      `/orders/${numericOrderId}/fulfillments.json`,
+      fulfillmentPayload
+    );
+
+    console.log(`✅ Fulfillment created successfully:`, fulfillmentResponse);
+
+    res.json({
+      success: true,
+      fulfillment: fulfillmentResponse,
+      message: "Fulfillment created successfully via REST API",
+      trackingNumber: trackingNumber,
+      trackingCompany: trackingCompany
+    });
 
   } catch (error) {
     console.error("❌ Error creating fulfillment:", error);
@@ -2400,37 +2204,17 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       console.error("📋 Headers:", error.response.headers);
       console.error("📄 Body:", error.response.body || error.response.data);
       
-      // Extract detailed error information
-      let errorDetails = "Unknown Shopify API error";
-      let shopifyErrors = null;
-      
+      // Avoid circular reference error when logging response
       try {
-        // Try to parse error response body
-        const errorBody = error.response.data || error.response.body;
-        if (typeof errorBody === 'string') {
-          shopifyErrors = JSON.parse(errorBody);
-        } else if (typeof errorBody === 'object') {
-          shopifyErrors = errorBody;
-        }
-        
-        if (shopifyErrors) {
-          console.error("🔍 Parsed Shopify Error:", JSON.stringify(shopifyErrors, null, 2));
-          
-          // Extract specific error messages
-          if (shopifyErrors.errors) {
-            if (typeof shopifyErrors.errors === 'string') {
-              errorDetails = shopifyErrors.errors;
-            } else if (Array.isArray(shopifyErrors.errors)) {
-              errorDetails = shopifyErrors.errors.join('; ');
-            } else if (typeof shopifyErrors.errors === 'object') {
-              errorDetails = JSON.stringify(shopifyErrors.errors);
-            }
-          }
-        }
-        
-      } catch (parseError) {
-        console.error("⚠️ Could not parse Shopify error response:", parseError.message);
-        errorDetails = `Raw error: ${error.response.data || error.response.body || 'No error body'}`;
+        const responseForLogging = {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          headers: error.response.headers,
+          data: error.response.data
+        };
+        console.error("🔍 Full Response:", JSON.stringify(responseForLogging, null, 2));
+      } catch (circularError) {
+        console.error("⚠️ Response contains circular references, skipping full log");
       }
       
       // Special handling for 406 errors
@@ -2445,10 +2229,8 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       }
       
       return res.status(error.response.statusCode || error.response.status || 500).json({
-        success: false,
         error: "Shopify API Error",
-        message: errorDetails,
-        shopifyErrors: shopifyErrors,
+        message: error.response.body?.errors || error.response.data?.errors || error.message,
         details: error.response.body || error.response.data,
         shopifyStatus: error.response.status || error.response.statusCode,
         timestamp: new Date().toISOString()
