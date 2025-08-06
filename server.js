@@ -3549,6 +3549,16 @@ app.use('*', (req, res) => {
   });
 });
 
+// Health check endpoint for local server detection
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    version: '2.0.0',
+    features: ['enhanced_graphql', 'rate_limiting', 'hubspot_integration']
+  });
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log("✅ ===============================================");
