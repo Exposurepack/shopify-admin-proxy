@@ -2624,8 +2624,6 @@ app.get("/orders", async (req, res) => {
                       id
                       title
                       sku
-                      weight
-                      weightUnit
                     }
                     customAttributes {
                       key
@@ -2638,9 +2636,6 @@ app.get("/orders", async (req, res) => {
                 id
                 displayStatus
                 status
-                trackingCompany
-                trackingNumbers
-                trackingUrls
                 estimatedDeliveryAt
                 deliveredAt
                 createdAt
@@ -2662,19 +2657,23 @@ app.get("/orders", async (req, res) => {
                 }
               }
               shippingLines {
-                title
-                code
-                price
-                priceSet {
-                  shopMoney {
-                    amount
-                    currencyCode
+                edges {
+                  node {
+                    title
+                    code
+                    price
+                    priceSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                    carrierIdentifier
+                    requestedFulfillmentService {
+                      id
+                      name
+                    }
                   }
-                }
-                carrierIdentifier
-                requestedFulfillmentService {
-                  id
-                  name
                 }
               }
               customAttributes {
@@ -2778,8 +2777,6 @@ app.get("/orders", async (req, res) => {
         productVendor: item.node.product?.vendor,
         variantId: item.node.variant?.id,
         variantSku: item.node.variant?.sku,
-        weight: item.node.variant?.weight,
-        weightUnit: item.node.variant?.weightUnit,
         unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
         line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
         original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
@@ -2796,9 +2793,6 @@ app.get("/orders", async (req, res) => {
         id: fulfillment.id,
         status: fulfillment.status,
         displayStatus: fulfillment.displayStatus,
-        trackingCompany: fulfillment.trackingCompany,
-        trackingNumbers: fulfillment.trackingNumbers,
-        trackingUrls: fulfillment.trackingUrls,
         estimatedDeliveryAt: fulfillment.estimatedDeliveryAt,
         deliveredAt: fulfillment.deliveredAt,
         createdAt: fulfillment.createdAt,
@@ -2812,13 +2806,13 @@ app.get("/orders", async (req, res) => {
       })) || [];
 
       // Enhanced shipping lines from GraphQL
-      const shippingLines = node.shippingLines?.map(shipping => ({
-        title: shipping.title,
-        code: shipping.code,
-        price: shipping.price,
-        amount: shipping.priceSet?.shopMoney?.amount,
-        carrierIdentifier: shipping.carrierIdentifier,
-        serviceName: shipping.requestedFulfillmentService?.name
+      const shippingLines = node.shippingLines?.edges?.map(edge => ({
+        title: edge.node.title,
+        code: edge.node.code,
+        price: edge.node.price,
+        amount: edge.node.priceSet?.shopMoney?.amount,
+        carrierIdentifier: edge.node.carrierIdentifier,
+        serviceName: edge.node.requestedFulfillmentService?.name
       })) || [];
 
       // Smart naming logic - prioritize GraphQL data, then custom attributes, then fallbacks
