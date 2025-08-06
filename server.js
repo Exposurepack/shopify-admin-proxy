@@ -68,6 +68,7 @@ const allowedOrigins = [
 const corsOptions = {
   origin: function (origin, callback) {
     console.log('🌐 CORS check for origin:', origin);
+    console.log('🌐 NODE_ENV:', NODE_ENV);
     
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
@@ -78,6 +79,12 @@ const corsOptions = {
     // In development, allow all origins
     if (NODE_ENV !== "production") {
       console.log('✅ CORS: Development mode - allowing all origins');
+      return callback(null, true);
+    }
+    
+    // TEMPORARY FIX: Allow exposurepack.com.au in production
+    if (origin && origin.includes('exposurepack.com.au')) {
+      console.log('✅ CORS: ExposurePack domain detected - allowing');
       return callback(null, true);
     }
     
@@ -96,19 +103,43 @@ const corsOptions = {
     });
     
     if (isAllowed) {
-      console.log('✅ CORS: Origin allowed');
+      console.log('✅ CORS: Origin allowed via allowed origins list');
       callback(null, true);
     } else {
       console.log('❌ CORS: Origin not allowed');
       console.log('📋 CORS: Allowed origins:', allowedOrigins);
+      console.log('📋 CORS: Received origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-API-Key'],
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 200 // For legacy browser support
 };
 app.use(cors(corsOptions));
+
+// Additional CORS debugging - handle preflight requests manually if needed
+app.options('*', (req, res) => {
+  console.log('🔧 Manual OPTIONS preflight handler triggered');
+  console.log('🔧 Origin:', req.headers.origin);
+  console.log('🔧 Method:', req.headers['access-control-request-method']);
+  console.log('🔧 Headers:', req.headers['access-control-request-headers']);
+  
+  // Set CORS headers manually for ExposurePack domain
+  if (req.headers.origin && req.headers.origin.includes('exposurepack.com.au')) {
+    res.header('Access-Control-Allow-Origin', req.headers.origin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, X-API-Key');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400'); // 24 hours
+    console.log('✅ Manual CORS headers set for ExposurePack domain');
+    return res.status(200).end();
+  }
+  
+  console.log('⚠️ Manual OPTIONS handler - origin not recognized');
+  res.status(204).end();
+});
 
 // Body parsing with size limits
 app.use(express.json({ 
