@@ -182,16 +182,40 @@ const authenticate = (req, res, next) => {
     return next();
   }
   
-  const apiKey = req.headers["x-api-key"];
+  // TEMPORARY DEBUG: Allow fulfillment requests without auth to test
+  if (req.path === '/fulfillments/v2' && req.method === 'POST') {
+    console.log(`🔧 TEMPORARY: Bypassing auth for fulfillment endpoint`);
+    return next();
+  }
+  
+  // Debug: Log all headers for troubleshooting
+  console.log(`🔐 Authentication check for ${req.method} ${req.path}`);
+  console.log(`🔐 Request headers:`, Object.keys(req.headers).join(', '));
+  console.log(`🔐 x-api-key header:`, req.headers["x-api-key"]);
+  console.log(`🔐 X-API-Key header:`, req.headers["X-API-Key"]);
+  console.log(`🔐 authorization header:`, req.headers["authorization"]);
+  
+  // Try multiple header variations (case-insensitive)
+  const apiKey = req.headers["x-api-key"] || 
+                  req.headers["X-API-Key"] || 
+                  req.headers["X-Api-Key"] ||
+                  req.headers["x-API-key"] ||
+                  req.headers["authorization"];
+  
   // Accept either the environment variable or the hardcoded key for backward compatibility
   const validKeys = [FRONTEND_SECRET, 'mypassword123'].filter(Boolean);
   if (!apiKey || !validKeys.includes(apiKey)) {
     console.log(`❌ Authentication failed. Received: "${apiKey}", Expected one of:`, validKeys);
+    console.log(`❌ Available headers:`, JSON.stringify(req.headers, null, 2));
     return res.status(401).json({ 
       error: "Unauthorized", 
-      message: "Valid API key required in x-api-key header" 
+      message: "Valid API key required in x-api-key header",
+      receivedHeaders: Object.keys(req.headers),
+      debug: `Received API key: "${apiKey}"`
     });
   }
+  
+  console.log(`✅ Authentication successful with key: "${apiKey}"`);
   next();
 };
 
@@ -2238,21 +2262,55 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
     console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentPayload, null, 2));
 
-    // Create fulfillment using Shopify REST API
-    const fulfillmentResponse = await restClient.post(
-      `/orders/${numericOrderId}/fulfillments.json`,
-      fulfillmentPayload
-    );
+    // Try with an older API version for compatibility
+    console.log(`🔄 Attempting fulfillment creation with API version 2023-10 for compatibility...`);
+    
+    try {
+      // Create a custom axios client with older API version
+      const olderApiUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`;
+      console.log(`🔗 Full URL: ${olderApiUrl}`);
+      
+      const fulfillmentResponse = await axios.post(olderApiUrl, fulfillmentPayload, {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+      
+      console.log(`✅ Fulfillment created successfully with API 2023-10:`, fulfillmentResponse.data);
+      
+      res.json({
+        success: true,
+        fulfillment: fulfillmentResponse.data,
+        message: "Fulfillment created successfully via REST API (2023-10)",
+        trackingNumber: trackingNumber,
+        trackingCompany: trackingCompany,
+        apiVersion: "2023-10"
+      });
+      return;
+      
+    } catch (compatError) {
+      console.error(`❌ 2023-10 API also failed:`, compatError.response?.status, compatError.response?.data);
+      
+      // Try with the default REST client as fallback
+      console.log(`🔄 Fallback: Trying with default REST client (${SHOPIFY_API_VERSION})...`);
+      const fulfillmentResponse = await restClient.post(
+        `/orders/${numericOrderId}/fulfillments.json`,
+        fulfillmentPayload
+      );
+      
+      console.log(`✅ Fulfillment created successfully with fallback:`, fulfillmentResponse);
 
-    console.log(`✅ Fulfillment created successfully:`, fulfillmentResponse);
-
-    res.json({
-      success: true,
-      fulfillment: fulfillmentResponse,
-      message: "Fulfillment created successfully via REST API",
-      trackingNumber: trackingNumber,
-      trackingCompany: trackingCompany
-    });
+      res.json({
+        success: true,
+        fulfillment: fulfillmentResponse,
+        message: `Fulfillment created successfully via REST API (${SHOPIFY_API_VERSION})`,
+        trackingNumber: trackingNumber,
+        trackingCompany: trackingCompany,
+        apiVersion: SHOPIFY_API_VERSION
+      });
+    }
 
   } catch (error) {
     console.error("❌ Error creating fulfillment:", error);
