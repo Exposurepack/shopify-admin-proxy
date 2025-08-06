@@ -1026,18 +1026,60 @@ async function createHubSpotDealFromShopifyOrder(order) {
       console.error(`❌ Failed to create contact, continuing without: ${contactError.message}`);
     }
 
-    // Calculate deal amount
-    const dealAmount = parseFloat(order.total_price) || 0;
+    // Process line items - separate shipping items from products
+    const allLineItems = order.line_items || [];
+    const productLineItems = allLineItems.filter(item => 
+      !item.title.toLowerCase().includes('shipping')
+    );
+    const shippingLineItems = allLineItems.filter(item => 
+      item.title.toLowerCase().includes('shipping')
+    );
+
+    console.log(`📦 Processing ${allLineItems.length} total line items: ${productLineItems.length} products, ${shippingLineItems.length} shipping items`);
+
+    // Calculate amounts
+    const grossAmount = parseFloat(order.total_price) || 0;
+    const subtotalAmount = parseFloat(order.subtotal_price) || 0;
+    const taxAmount = parseFloat(order.total_tax) || 0;
+    const shopifyShippingAmount = parseFloat(order.total_shipping_price_set?.shop_money?.amount) || 0;
+    
+    // Calculate total shipping cost (Shopify shipping + shipping line items)
+    const shippingLineItemsTotal = shippingLineItems.reduce((sum, item) => 
+      sum + (parseFloat(item.price) * parseInt(item.quantity)), 0
+    );
+    const totalShippingCost = shopifyShippingAmount + shippingLineItemsTotal;
+
+    // Calculate ex-GST amounts (Australian GST is 10%)
+    const gstRate = 0.10;
+    const exGstAmount = grossAmount / (1 + gstRate);
+    const calculatedGstAmount = grossAmount - exGstAmount;
+
     const currency = order.currency || 'AUD';
+
+    console.log(`💰 Financial breakdown:`);
+    console.log(`   Gross Total: $${grossAmount.toFixed(2)} ${currency}`);
+    console.log(`   Ex-GST Total: $${exGstAmount.toFixed(2)} ${currency}`);
+    console.log(`   GST Amount: $${calculatedGstAmount.toFixed(2)} ${currency}`);
+    console.log(`   Shipping Total: $${totalShippingCost.toFixed(2)} ${currency}`);
+    console.log(`   Subtotal: $${subtotalAmount.toFixed(2)} ${currency}`);
 
     // Prepare deal data
     const dealData = {
       dealname: `Shopify Order ${order.name}`,
-      amount: dealAmount,
+      amount: exGstAmount, // Send ex-GST amount as the main deal amount
       dealstage: 'closedwon', // Set to closed won as requested
       pipeline: 'default', // You may need to adjust this based on your HubSpot setup
       closedate: new Date().toISOString().split('T')[0], // Today's date
       hubspot_owner_id: '', // You can set a default owner if needed
+      
+      // Enhanced financial data
+      shopify_total_inc_gst: grossAmount,
+      shopify_total_ex_gst: exGstAmount,
+      shopify_gst_amount: calculatedGstAmount,
+      shopify_subtotal: subtotalAmount,
+      shopify_tax_amount: taxAmount,
+      shopify_shipping_cost: totalShippingCost,
+      shopify_shipping_method: order.shipping_lines?.[0]?.title || 'Standard',
       
       // Custom properties for Shopify data
       shopify_order_id: order.id,
@@ -1047,15 +1089,21 @@ async function createHubSpotDealFromShopifyOrder(order) {
       
       // Additional info
       hs_deal_currency_code: currency,
-      deal_source: 'Shopify',
-      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nItems: ${order.line_items?.length || 0}\nCustomer: ${customer.email || 'N/A'}${order.line_items?.length > 0 ? `\n\nLine Items:\n${order.line_items.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}`
+      deal_source: 'Shopify Website',
+      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nProduct Items: ${productLineItems.length}\nShipping Items: ${shippingLineItems.length}\nCustomer: ${customer.email || 'N/A'}\n\nFinancials:\nTotal (inc GST): $${grossAmount.toFixed(2)}\nTotal (ex GST): $${exGstAmount.toFixed(2)}\nGST: $${calculatedGstAmount.toFixed(2)}\nShipping: $${totalShippingCost.toFixed(2)}${productLineItems.length > 0 ? `\n\nProduct Items:\n${productLineItems.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}${shippingLineItems.length > 0 ? `\n\nShipping Items (processed as shipping cost):\n${shippingLineItems.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}`
     };
 
-    console.log(`🤝 Creating deal: ${dealData.dealname} - $${dealAmount} ${currency}`);
-    console.log(`📊 Deal summary: ${order.line_items?.length || 0} line items, Total: $${dealAmount}`);
-    if (order.line_items && order.line_items.length > 0) {
-      console.log(`📝 Line items preview:`);
-      order.line_items.forEach((item, i) => {
+    console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
+    console.log(`📊 Deal summary: ${productLineItems.length} product items, ${shippingLineItems.length} shipping items, Total: $${grossAmount.toFixed(2)} (inc GST)`);
+    if (productLineItems.length > 0) {
+      console.log(`📝 Product line items preview:`);
+      productLineItems.forEach((item, i) => {
+        console.log(`   ${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`);
+      });
+    }
+    if (shippingLineItems.length > 0) {
+      console.log(`🚚 Shipping line items (processed as shipping cost):`);
+      shippingLineItems.forEach((item, i) => {
         console.log(`   ${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`);
       });
     }
@@ -1069,29 +1117,39 @@ async function createHubSpotDealFromShopifyOrder(order) {
       await hubspotClient.associateContactWithDeal(contact.id, deal.id);
     }
 
-    // Create line items in HubSpot if order has line items
-    if (order.line_items && order.line_items.length > 0) {
-      console.log(`📝 Creating ${order.line_items.length} line items in HubSpot for deal ${deal.id}`);
+    // Create line items in HubSpot for PRODUCT items only (shipping items are handled as shipping cost)
+    if (productLineItems && productLineItems.length > 0) {
+      console.log(`📝 Creating ${productLineItems.length} product line items in HubSpot for deal ${deal.id}`);
       
       try {
-        for (let i = 0; i < order.line_items.length; i++) {
-          const shopifyLineItem = order.line_items[i];
+        for (let i = 0; i < productLineItems.length; i++) {
+          const shopifyLineItem = productLineItems[i];
+          
+          // Calculate ex-GST price for line item
+          const grossLinePrice = parseFloat(shopifyLineItem.price) || 0;
+          const exGstLinePrice = grossLinePrice / (1 + gstRate);
+          const grossLineTotal = grossLinePrice * (parseInt(shopifyLineItem.quantity) || 1);
+          const exGstLineTotal = exGstLinePrice * (parseInt(shopifyLineItem.quantity) || 1);
           
           // Transform Shopify line item to HubSpot format
           const hubspotLineItem = {
             name: shopifyLineItem.title || shopifyLineItem.name || `Item ${i + 1}`,
             quantity: parseInt(shopifyLineItem.quantity) || 1,
-            price: parseFloat(shopifyLineItem.price) || 0,
-            amount: parseFloat(shopifyLineItem.price) * (parseInt(shopifyLineItem.quantity) || 1),
+            price: exGstLinePrice, // Use ex-GST price
+            amount: exGstLineTotal, // Use ex-GST total
             hs_sku: shopifyLineItem.sku || shopifyLineItem.variant_id || `SHOPIFY-${shopifyLineItem.id}`,
-            description: `Shopify Line Item\nVariant ID: ${shopifyLineItem.variant_id || 'N/A'}\nProduct ID: ${shopifyLineItem.product_id || 'N/A'}${shopifyLineItem.variant_title ? `\nVariant: ${shopifyLineItem.variant_title}` : ''}`,
+            description: `Shopify Product Line Item\nVariant ID: ${shopifyLineItem.variant_id || 'N/A'}\nProduct ID: ${shopifyLineItem.product_id || 'N/A'}${shopifyLineItem.variant_title ? `\nVariant: ${shopifyLineItem.variant_title}` : ''}\n\nPricing:\nPrice (ex-GST): $${exGstLinePrice.toFixed(2)}\nPrice (inc GST): $${grossLinePrice.toFixed(2)}\nTotal (ex-GST): $${exGstLineTotal.toFixed(2)}\nTotal (inc GST): $${grossLineTotal.toFixed(2)}`,
             // Custom properties for Shopify data
             shopify_line_item_id: shopifyLineItem.id,
             shopify_product_id: shopifyLineItem.product_id,
-            shopify_variant_id: shopifyLineItem.variant_id
+            shopify_variant_id: shopifyLineItem.variant_id,
+            shopify_price_inc_gst: grossLinePrice,
+            shopify_price_ex_gst: exGstLinePrice,
+            shopify_total_inc_gst: grossLineTotal,
+            shopify_total_ex_gst: exGstLineTotal
           };
 
-          console.log(`📝 Creating line item: ${hubspotLineItem.name} (Qty: ${hubspotLineItem.quantity}, Price: $${hubspotLineItem.price})`);
+          console.log(`📝 Creating product line item: ${hubspotLineItem.name} (Qty: ${hubspotLineItem.quantity}, Price: $${exGstLinePrice.toFixed(2)} ex-GST)`);
 
           // Create line item in HubSpot
           const createdLineItem = await hubspotClient.createLineItem(hubspotLineItem);
@@ -1102,14 +1160,23 @@ async function createHubSpotDealFromShopifyOrder(order) {
           }
         }
         
-        console.log(`✅ Successfully created all ${order.line_items.length} line items in HubSpot`);
+        console.log(`✅ Successfully created all ${productLineItems.length} product line items in HubSpot`);
         
       } catch (lineItemError) {
         console.error(`❌ Error creating line items (continuing with deal creation):`, lineItemError.message);
         // Don't throw error - line item creation failure shouldn't break the whole flow
       }
     } else {
-      console.log(`ℹ️ No line items found in Shopify order ${order.name}`);
+      console.log(`ℹ️ No product line items found in Shopify order ${order.name}`);
+    }
+
+    // Log shipping handling summary
+    if (shippingLineItems.length > 0 || totalShippingCost > 0) {
+      console.log(`🚚 Shipping Summary:`);
+      console.log(`   Shopify Shipping: $${shopifyShippingAmount.toFixed(2)}`);
+      console.log(`   Shipping Line Items: $${shippingLineItemsTotal.toFixed(2)}`);
+      console.log(`   Total Shipping Cost: $${totalShippingCost.toFixed(2)} (stored in deal.shopify_shipping_cost)`);
+      console.log(`   Note: Shipping line items are NOT created as separate line items in HubSpot`);
     }
 
     console.log(`✅ Successfully created HubSpot deal from Shopify order ${order.name}`);
@@ -2784,10 +2851,25 @@ app.get("/rest/locations", async (req, res) => {
  * Creates a deal in HubSpot when a new order is placed
  */
 app.post("/shopify-webhook", async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     console.log("🛒 Shopify webhook received - Order created");
-    console.log("🔍 Headers:", req.headers);
+    console.log("🔍 Headers:", {
+      'x-shopify-topic': req.headers['x-shopify-topic'],
+      'x-shopify-shop-domain': req.headers['x-shopify-shop-domain'],
+      'x-shopify-webhook-id': req.headers['x-shopify-webhook-id'],
+      'content-type': req.headers['content-type'],
+      'user-agent': req.headers['user-agent']
+    });
     console.log("🔍 Raw body type:", typeof req.body);
+    
+    // Verify this is an order creation webhook
+    const webhookTopic = req.headers['x-shopify-topic'];
+    if (webhookTopic !== 'orders/create') {
+      console.log(`⚠️ Unexpected webhook topic: ${webhookTopic}, expected: orders/create`);
+      return res.status(200).json({ received: true, processed: false, message: `Ignoring webhook topic: ${webhookTopic}` });
+    }
     
     if (!hubspotClient) {
       console.log("⚠️ HubSpot client not available - cannot create deal");
@@ -2802,29 +2884,47 @@ app.post("/shopify-webhook", async (req, res) => {
       return res.status(200).json({ received: true, processed: false, message: "Invalid JSON payload" });
     }
 
-    console.log("🛒 Shopify order received:", JSON.stringify(order, null, 2));
+    // Validate order data
+    if (!order || !order.id || !order.name) {
+      console.error("❌ Invalid order data - missing required fields (id, name)");
+      console.log("📝 Received order data:", JSON.stringify(order, null, 2));
+      return res.status(200).json({ received: true, processed: false, message: "Invalid order data" });
+    }
+
+    console.log(`🛒 Processing Shopify order: ${order.name} (ID: ${order.id})`);
+    console.log(`💰 Order total: ${order.total_price} ${order.currency || 'AUD'}`);
+    console.log(`👤 Customer: ${order.customer?.email || 'N/A'}`);
+    console.log(`📦 Line items: ${order.line_items?.length || 0}`);
 
     // Create HubSpot deal from Shopify order
-    await createHubSpotDealFromShopifyOrder(order);
+    const createdDeal = await createHubSpotDealFromShopifyOrder(order);
+
+    const processingTime = Date.now() - startTime;
+    console.log(`⏱️ Webhook processing completed in ${processingTime}ms`);
 
     res.status(200).json({ 
       received: true, 
       processed: true, 
       message: "Deal created in HubSpot successfully",
       orderId: order.id,
-      orderNumber: order.name
+      orderNumber: order.name,
+      hubspotDealId: createdDeal?.id || null,
+      processingTimeMs: processingTime
     });
 
   } catch (error) {
+    const processingTime = Date.now() - startTime;
     console.error("❌ Error processing Shopify webhook:", error.message);
     console.error("❌ Stack trace:", error.stack);
+    console.error(`⏱️ Failed after ${processingTime}ms`);
     
     // Always return 200 to prevent Shopify retries
     res.status(200).json({ 
       received: true, 
       processed: false, 
       error: error.message,
-      message: "Error occurred but webhook acknowledged" 
+      message: "Error occurred but webhook acknowledged",
+      processingTimeMs: processingTime
     });
   }
 });
