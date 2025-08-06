@@ -2165,11 +2165,14 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     const locationId = locations[0].id;
     console.log(`📍 Using location_id: ${locationId} (${locations[0].name || 'Default'})`);
 
-    // Pre-check: Verify order exists and is fulfillable
-    console.log(`🔍 Fetching order details for pre-check...`);
+    // Fetch order details to get line items for fulfillment
+    console.log(`🔍 Fetching order details to get line items...`);
+    let orderDetails;
+    let unfulfillableLineItems = [];
+    
     try {
       const orderCheckResponse = await restClient.get(`/orders/${numericOrderId}.json`);
-      const orderDetails = orderCheckResponse.order;
+      orderDetails = orderCheckResponse.order;
       
       console.log(`📋 Order Status Check:`);
       console.log(`   💰 Financial Status: ${orderDetails.financial_status}`);
@@ -2186,20 +2189,46 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
         throw new Error(`Order is already fully fulfilled.`);
       }
 
-      console.log(`✅ Order appears fulfillable, proceeding with fulfillment creation...`);
+      // Get unfulfilled line items
+      unfulfillableLineItems = orderDetails.line_items.filter(item => {
+        const fulfilledQty = item.fulfilled_quantity || 0;
+        const totalQty = item.quantity || 0;
+        const canFulfill = totalQty > fulfilledQty;
+        
+        console.log(`   📦 Line Item ${item.id}: "${item.name}" - ${fulfilledQty}/${totalQty} fulfilled (can fulfill: ${canFulfill})`);
+        return canFulfill;
+      });
+
+      if (unfulfillableLineItems.length === 0) {
+        throw new Error('No unfulfilled line items found in this order');
+      }
+
+      console.log(`✅ Found ${unfulfillableLineItems.length} fulfillable line items, proceeding...`);
       
     } catch (orderFetchError) {
-      console.error(`⚠️ Could not fetch order details for pre-check:`, orderFetchError.message);
-      console.log(`🔄 Proceeding with fulfillment anyway...`);
+      console.error(`❌ Could not fetch order details:`, orderFetchError.message);
+      throw new Error(`Unable to fetch order details: ${orderFetchError.message}`);
     }
 
-    // Create fulfillment payload
+    // Create line items array for fulfillment
+    const lineItems = unfulfillableLineItems.map(item => {
+      const remainingQty = (item.quantity || 0) - (item.fulfilled_quantity || 0);
+      console.log(`   📦 Adding line item ${item.id} with quantity ${remainingQty} to fulfillment`);
+      
+      return {
+        id: item.id,
+        quantity: remainingQty
+      };
+    });
+
+    // Create fulfillment payload with line items
     const fulfillmentPayload = {
       fulfillment: {
         location_id: locationId,
         tracking_number: trackingNumber,
         tracking_company: trackingCompany,
-        notify_customer: notifyCustomer
+        notify_customer: notifyCustomer,
+        line_items: lineItems
       }
     };
 
@@ -2238,17 +2267,37 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       console.error("📋 Headers:", error.response.headers);
       console.error("📄 Body:", error.response.body || error.response.data);
       
-      // Avoid circular reference error when logging response
+      // Extract detailed error information
+      let errorDetails = "Unknown Shopify API error";
+      let shopifyErrors = null;
+      
       try {
-        const responseForLogging = {
-          status: error.response.status,
-          statusText: error.response.statusText,
-          headers: error.response.headers,
-          data: error.response.data
-        };
-        console.error("🔍 Full Response:", JSON.stringify(responseForLogging, null, 2));
-      } catch (circularError) {
-        console.error("⚠️ Response contains circular references, skipping full log");
+        // Try to parse error response body
+        const errorBody = error.response.data || error.response.body;
+        if (typeof errorBody === 'string') {
+          shopifyErrors = JSON.parse(errorBody);
+        } else if (typeof errorBody === 'object') {
+          shopifyErrors = errorBody;
+        }
+        
+        if (shopifyErrors) {
+          console.error("🔍 Parsed Shopify Error:", JSON.stringify(shopifyErrors, null, 2));
+          
+          // Extract specific error messages
+          if (shopifyErrors.errors) {
+            if (typeof shopifyErrors.errors === 'string') {
+              errorDetails = shopifyErrors.errors;
+            } else if (Array.isArray(shopifyErrors.errors)) {
+              errorDetails = shopifyErrors.errors.join('; ');
+            } else if (typeof shopifyErrors.errors === 'object') {
+              errorDetails = JSON.stringify(shopifyErrors.errors);
+            }
+          }
+        }
+        
+      } catch (parseError) {
+        console.error("⚠️ Could not parse Shopify error response:", parseError.message);
+        errorDetails = `Raw error: ${error.response.data || error.response.body || 'No error body'}`;
       }
       
       // Special handling for 406 errors
@@ -2263,8 +2312,10 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
       }
       
       return res.status(error.response.statusCode || error.response.status || 500).json({
+        success: false,
         error: "Shopify API Error",
-        message: error.response.body?.errors || error.response.data?.errors || error.message,
+        message: errorDetails,
+        shopifyErrors: shopifyErrors,
         details: error.response.body || error.response.data,
         shopifyStatus: error.response.status || error.response.statusCode,
         timestamp: new Date().toISOString()
