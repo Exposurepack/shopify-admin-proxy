@@ -2262,54 +2262,129 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
     console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentPayload, null, 2));
 
-    // Try with an older API version for compatibility
-    console.log(`🔄 Attempting fulfillment creation with API version 2023-10 for compatibility...`);
+    // Try multiple fulfillment strategies to overcome 406 errors
+    console.log(`🔄 Attempting multiple fulfillment strategies...`);
+    
+    // Strategy 1: Simplified fulfillment without line items (auto-fulfill all)
+    console.log(`📋 Strategy 1: Simplified fulfillment (auto-fulfill all unfulfilled items)`);
+    const simplifiedPayload = {
+      fulfillment: {
+        location_id: locationId,
+        tracking_number: trackingNumber,
+        tracking_company: trackingCompany,
+        notify_customer: notifyCustomer
+        // Note: No line_items specified - Shopify will fulfill all unfulfilled items
+      }
+    };
     
     try {
-      // Create a custom axios client with older API version
-      const olderApiUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`;
-      console.log(`🔗 Full URL: ${olderApiUrl}`);
+      console.log(`🔗 Trying simplified payload:`, JSON.stringify(simplifiedPayload, null, 2));
       
-      const fulfillmentResponse = await axios.post(olderApiUrl, fulfillmentPayload, {
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
-      });
-      
-      console.log(`✅ Fulfillment created successfully with API 2023-10:`, fulfillmentResponse.data);
-      
-      res.json({
-        success: true,
-        fulfillment: fulfillmentResponse.data,
-        message: "Fulfillment created successfully via REST API (2023-10)",
-        trackingNumber: trackingNumber,
-        trackingCompany: trackingCompany,
-        apiVersion: "2023-10"
-      });
-      return;
-      
-    } catch (compatError) {
-      console.error(`❌ 2023-10 API also failed:`, compatError.response?.status, compatError.response?.data);
-      
-      // Try with the default REST client as fallback
-      console.log(`🔄 Fallback: Trying with default REST client (${SHOPIFY_API_VERSION})...`);
-      const fulfillmentResponse = await restClient.post(
-        `/orders/${numericOrderId}/fulfillments.json`,
-        fulfillmentPayload
+      const simplifiedResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`,
+        simplifiedPayload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
       );
       
-      console.log(`✅ Fulfillment created successfully with fallback:`, fulfillmentResponse);
-
-      res.json({
+      console.log(`✅ Simplified fulfillment successful:`, simplifiedResponse.data);
+      
+      return res.json({
         success: true,
-        fulfillment: fulfillmentResponse,
-        message: `Fulfillment created successfully via REST API (${SHOPIFY_API_VERSION})`,
+        fulfillment: simplifiedResponse.data,
+        message: "Fulfillment created successfully via simplified method (2023-10)",
         trackingNumber: trackingNumber,
         trackingCompany: trackingCompany,
-        apiVersion: SHOPIFY_API_VERSION
+        apiVersion: "2023-10",
+        method: "simplified"
       });
+      
+    } catch (simplifiedError) {
+      console.error(`❌ Simplified method also failed:`, simplifiedError.response?.status, simplifiedError.response?.data);
+    }
+    
+    // Strategy 2: Try with 2024-01 API (stable version)
+    console.log(`📋 Strategy 2: Trying with API version 2024-01 (stable)`);
+    try {
+      const stableResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${numericOrderId}/fulfillments.json`,
+        simplifiedPayload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+      
+      console.log(`✅ 2024-01 API fulfillment successful:`, stableResponse.data);
+      
+      return res.json({
+        success: true,
+        fulfillment: stableResponse.data,
+        message: "Fulfillment created successfully via 2024-01 API",
+        trackingNumber: trackingNumber,
+        trackingCompany: trackingCompany,
+        apiVersion: "2024-01",
+        method: "stable"
+      });
+      
+    } catch (stableError) {
+      console.error(`❌ 2024-01 API also failed:`, stableError.response?.status, stableError.response?.data);
+    }
+    
+    // Strategy 3: Force fulfillment with minimum required fields only
+    console.log(`📋 Strategy 3: Minimal fulfillment (tracking only)`);
+    const minimalPayload = {
+      fulfillment: {
+        tracking_number: trackingNumber,
+        tracking_company: trackingCompany,
+        notify_customer: notifyCustomer
+        // Note: No location_id, no line_items - absolute minimum
+      }
+    };
+    
+    try {
+      console.log(`🔗 Trying minimal payload:`, JSON.stringify(minimalPayload, null, 2));
+      
+      const minimalResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/orders/${numericOrderId}/fulfillments.json`,
+        minimalPayload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+      
+      console.log(`✅ Minimal fulfillment successful:`, minimalResponse.data);
+      
+      return res.json({
+        success: true,
+        fulfillment: minimalResponse.data,
+        message: "Fulfillment created successfully via minimal method",
+        trackingNumber: trackingNumber,
+        trackingCompany: trackingCompany,
+        apiVersion: "2023-10",
+        method: "minimal"
+      });
+      
+    } catch (minimalError) {
+      console.error(`❌ All fulfillment strategies failed:`);
+      console.error(`   - Simplified: ${simplifiedError?.response?.status}`);
+      console.error(`   - Stable API: ${stableError?.response?.status}`);
+      console.error(`   - Minimal: ${minimalError?.response?.status}`);
+      
+      // Re-throw the original error for the existing error handler
+      throw minimalError;
     }
 
   } catch (error) {
