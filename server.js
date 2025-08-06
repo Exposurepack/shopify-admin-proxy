@@ -2508,36 +2508,7 @@ app.get("/orders", async (req, res) => {
               note
               displayFinancialStatus
               displayFulfillmentStatus
-              confirmed
-              closed
-              cancelledAt
-              cancelReason
-              email
-              currentSubtotalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              currentTotalTaxSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              currentShippingPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
               totalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              netPaymentSet {
                 shopMoney {
                   amount
                   currencyCode
@@ -2546,8 +2517,6 @@ app.get("/orders", async (req, res) => {
               customer {
                 id
                 displayName
-                firstName
-                lastName
                 email
                 phone
               }
@@ -2559,37 +2528,17 @@ app.get("/orders", async (req, res) => {
                 address2
                 city
                 province
-                provinceCode
                 country
-                countryCode
                 zip
-                phone
               }
-              billingAddress {
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                provinceCode
-                country
-                countryCode
-                zip
-                phone
-              }
-              lineItems(first: 50) {
+              lineItems(first: 10) {
                 edges {
                   node {
-                    id
                     title
-                    name
                     quantity
                     sku
                     variantTitle
                     vendor
-                    fulfillmentStatus
                     originalUnitPriceSet {
                       shopMoney {
                         amount
@@ -2615,72 +2564,13 @@ app.get("/orders", async (req, res) => {
                       }
                     }
                     product {
-                      id
                       title
                       productType
-                      vendor
-                    }
-                    variant {
-                      id
-                      title
-                      sku
-                    }
-                    customAttributes {
-                      key
-                      value
                     }
                   }
                 }
               }
-              fulfillments {
-                id
-                displayStatus
-                status
-                estimatedDeliveryAt
-                deliveredAt
-                createdAt
-                updatedAt
-                location {
-                  id
-                  name
-                }
-                fulfillmentLineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                      }
-                    }
-                  }
-                }
-              }
-              shippingLines {
-                edges {
-                  node {
-                    title
-                    code
-                    price
-                    priceSet {
-                      shopMoney {
-                        amount
-                        currencyCode
-                      }
-                    }
-                    carrierIdentifier
-                    requestedFulfillmentService {
-                      id
-                      name
-                    }
-                  }
-                }
-              }
-              customAttributes {
-                key
-                value
-              }
-              metafields(first: 30, namespace: "custom") {
+              metafields(first: 20, namespace: "custom") {
                 edges {
                   node {
                     key
@@ -2715,31 +2605,21 @@ app.get("/orders", async (req, res) => {
       orders = data.data.orders.edges;
     }
 
-    // Only fetch note_attributes for orders that don't have complete data in GraphQL
-    console.log("📋 Checking if REST API supplement is needed...");
+    // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
+    console.log("📋 Fetching note_attributes for all orders...");
     let restOrdersMap = {};
-    
-    // Check if we have customer data in GraphQL response
-    const sampleOrder = orders[0]?.node;
-    const needsRESTSupplement = !sampleOrder?.customer?.firstName || !sampleOrder?.customAttributes;
-    
-    if (needsRESTSupplement) {
-      console.log("⚠️ GraphQL data incomplete, fetching note_attributes via REST API...");
-      try {
-        const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any&fields=id,note_attributes`);
-        restOrdersRes.orders.forEach((order) => {
-          const noteAttributes = {};
-          order.note_attributes.forEach((na) => {
-            noteAttributes[na.name] = na.value;
-          });
-          restOrdersMap[order.id] = noteAttributes;
+    try {
+      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any`);
+      restOrdersRes.orders.forEach((order) => {
+        const noteAttributes = {};
+        order.note_attributes.forEach((na) => {
+          noteAttributes[na.name] = na.value;
         });
-        console.log(`✅ Fetched note_attributes for ${Object.keys(restOrdersMap).length} orders`);
-      } catch (restError) {
-        console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
-      }
-    } else {
-      console.log("✅ GraphQL data is complete, skipping REST API calls");
+        restOrdersMap[order.id] = noteAttributes;
+      });
+      console.log(`✅ Fetched note_attributes for ${Object.keys(restOrdersMap).length} orders`);
+    } catch (restError) {
+      console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
     }
 
     // Transform the data with smart naming
@@ -2749,152 +2629,51 @@ app.get("/orders", async (req, res) => {
         metafields[mf.node.key] = mf.node.value;
       });
 
-      // Get note_attributes for this order (fallback only)
+      // Get note_attributes for this order
       const noteAttributes = restOrdersMap[node.legacyResourceId] || {};
-      
-      // Get custom attributes from GraphQL (preferred)
-      const customAttributes = {};
-      if (node.customAttributes) {
-        node.customAttributes.forEach((attr) => {
-          customAttributes[attr.key] = attr.value;
-        });
-      }
-      
-      // Merge custom attributes with note attributes (custom attributes take priority)
-      const allAttributes = { ...noteAttributes, ...customAttributes };
 
       const lineItems = node.lineItems.edges.map((item) => ({
-        id: item.node.id,
         title: item.node.title,
-        name: item.node.name || item.node.title,
         quantity: item.node.quantity,
         sku: item.node.sku,
         variantTitle: item.node.variantTitle,
         vendor: item.node.vendor,
-        fulfillmentStatus: item.node.fulfillmentStatus,
         productTitle: item.node.product?.title,
         productType: item.node.product?.productType,
-        productVendor: item.node.product?.vendor,
-        variantId: item.node.variant?.id,
-        variantSku: item.node.variant?.sku,
         unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
         line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
         original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
         original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
-        // Check if this is a shipping line item
-        isShipping: item.node.title?.toLowerCase().includes('shipping') || 
-                   item.node.name?.toLowerCase().includes('shipping') ||
-                   item.node.product?.productType?.toLowerCase().includes('shipping'),
-        customAttributes: item.node.customAttributes || []
       }));
 
-      // Enhanced fulfillment data from GraphQL
-      const fulfillments = node.fulfillments?.map(fulfillment => ({
-        id: fulfillment.id,
-        status: fulfillment.status,
-        displayStatus: fulfillment.displayStatus,
-        estimatedDeliveryAt: fulfillment.estimatedDeliveryAt,
-        deliveredAt: fulfillment.deliveredAt,
-        createdAt: fulfillment.createdAt,
-        locationId: fulfillment.location?.id,
-        locationName: fulfillment.location?.name,
-        lineItems: fulfillment.fulfillmentLineItems?.edges?.map(item => ({
-          id: item.node.id,
-          quantity: item.node.quantity,
-          lineItemId: item.node.lineItem?.id
-        })) || []
-      })) || [];
-
-      // Enhanced shipping lines from GraphQL
-      const shippingLines = node.shippingLines?.edges?.map(edge => ({
-        title: edge.node.title,
-        code: edge.node.code,
-        price: edge.node.price,
-        amount: edge.node.priceSet?.shopMoney?.amount,
-        carrierIdentifier: edge.node.carrierIdentifier,
-        serviceName: edge.node.requestedFulfillmentService?.name
-      })) || [];
-
-      // Smart naming logic - prioritize GraphQL data, then custom attributes, then fallbacks
-      const customerFirstName = node.customer?.firstName || allAttributes.customer_first_name || node.shippingAddress?.firstName || '';
-      const customerLastName = node.customer?.lastName || allAttributes.customer_last_name || node.shippingAddress?.lastName || '';
-      const businessName = allAttributes.business_name || 
-                          allAttributes.company_name || 
-                          node.shippingAddress?.company || 
-                          node.billingAddress?.company || 
-                          node.customer?.displayName || 
-                          'Unknown';
+      // Smart naming logic - prioritize attributes over default names
+      const businessName = noteAttributes.business_name || noteAttributes.company_name || node.shippingAddress?.company || node.customer?.displayName || 'Unknown';
       const customerName = noteAttributes.customer_name || node.customer?.displayName || noteAttributes.business_name || 'Unknown Customer';
       
       return {
         id: node.id,
         legacy_id: node.legacyResourceId,
-        legacyResourceId: node.legacyResourceId, // For backward compatibility
         name: node.name,
         created_at: node.createdAt,
         updated_at: node.updatedAt,
         financial_status: node.displayFinancialStatus,
         fulfillment_status: node.displayFulfillmentStatus,
-        confirmed: node.confirmed,
-        closed: node.closed,
-        cancelled_at: node.cancelledAt,
-        cancel_reason: node.cancelReason,
-        email: node.email,
         tags: node.tags || [],
         note: node.note,
-        
-        // Enhanced pricing data from GraphQL
-        total_price: node.totalPriceSet?.shopMoney?.amount || '0',
-        subtotal_price: node.currentSubtotalPriceSet?.shopMoney?.amount || '0',
-        total_tax: node.currentTotalTaxSet?.shopMoney?.amount || '0',
-        shipping_price: node.currentShippingPriceSet?.shopMoney?.amount || '0',
-        net_payment: node.netPaymentSet?.shopMoney?.amount || '0',
-        currency: node.totalPriceSet?.shopMoney?.currencyCode || 'USD',
-        
-        // Enhanced customer data from GraphQL
+        total_price: node.totalPriceSet.shopMoney.amount,
+        currency: node.totalPriceSet.shopMoney.currencyCode,
         customer: node.customer ? {
           id: node.customer.id,
           name: node.customer.displayName,
-          firstName: node.customer.firstName,
-          lastName: node.customer.lastName,
           email: node.customer.email,
           phone: node.customer.phone
         } : null,
-        
-        // Customer name fields for backward compatibility
-        customer_first_name: customerFirstName,
-        customer_last_name: customerLastName,
-        customer_email: node.customer?.email || node.email,
-        customer_phone: node.customer?.phone,
-        
-        // Enhanced address data from GraphQL
-        shipping_address: node.shippingAddress ? {
-          ...node.shippingAddress,
-          name: `${node.shippingAddress.firstName || ''} ${node.shippingAddress.lastName || ''}`.trim()
-        } : null,
-        billing_address: node.billingAddress ? {
-          ...node.billingAddress,
-          name: `${node.billingAddress.firstName || ''} ${node.billingAddress.lastName || ''}`.trim()
-        } : null,
-        
-        // Business data from checkout
-        checkout_business_name: node.shippingAddress?.company || node.billingAddress?.company,
-        checkout_customer_name: `${customerFirstName} ${customerLastName}`.trim() || node.customer?.displayName,
-        
-        // Enhanced fulfillment and shipping data
-        fulfillments,
-        shipping_lines: shippingLines,
-        
-        // Metadata and attributes
+        shipping_address: node.shippingAddress,
         metafields,
-        attributes: allAttributes, // Includes both custom attributes and note attributes
-        customAttributes: node.customAttributes || [],
-        
-        // Smart display names (prioritizes GraphQL data)
+        attributes: noteAttributes,
+        // Smart display names (prioritizes custom attributes)
         display_business_name: businessName,
-        display_customer_name: `${customerFirstName} ${customerLastName}`.trim() || businessName,
-        
-        // Line items with enhanced data
+        display_customer_name: customerName,
         line_items: lineItems,
       };
     });
@@ -3546,16 +3325,6 @@ app.use('*', (req, res) => {
       "POST /webhook",
       "POST /shopify-webhook"
     ]
-  });
-});
-
-// Health check endpoint for local server detection
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    version: '2.0.0',
-    features: ['enhanced_graphql', 'rate_limiting', 'hubspot_integration']
   });
 });
 
