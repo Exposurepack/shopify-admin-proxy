@@ -929,6 +929,79 @@ class HubSpotClient {
       // Don't throw error - association failure shouldn't break the whole flow
     }
   }
+
+  async getDealsForAnalytics(dateRange = null) {
+    try {
+      console.log(`📊 Fetching HubSpot deals for analytics...`);
+      
+      const params = {
+        properties: [
+          'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
+          'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
+          'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
+          'shopify_order_id', 'deal_source', 'hs_deal_currency_code'
+        ].join(','),
+        limit: 100
+      };
+
+      // Add date filter if provided
+      if (dateRange && dateRange.startDate && dateRange.endDate) {
+        const startTimestamp = new Date(dateRange.startDate).getTime();
+        const endTimestamp = new Date(dateRange.endDate).getTime();
+        
+        params.filterGroups = JSON.stringify([{
+          filters: [
+            {
+              propertyName: 'createdate',
+              operator: 'BETWEEN',
+              highValue: endTimestamp,
+              value: startTimestamp
+            }
+          ]
+        }]);
+      }
+
+      let allDeals = [];
+      let hasMore = true;
+      let after = 0;
+
+      while (hasMore) {
+        params.after = after;
+        
+        const response = await axios.post(
+          `${this.baseURL}/crm/v3/objects/deals/search`,
+          {
+            filterGroups: params.filterGroups ? JSON.parse(params.filterGroups) : [],
+            properties: params.properties.split(','),
+            limit: params.limit,
+            after: params.after
+          },
+          { headers: this.headers }
+        );
+
+        const deals = response.data.results || [];
+        allDeals = allDeals.concat(deals);
+        
+        console.log(`📄 Fetched ${deals.length} deals, total: ${allDeals.length}`);
+        
+        hasMore = response.data.paging?.next?.after;
+        after = hasMore;
+        
+        // Safety limit
+        if (allDeals.length > 1000) {
+          console.warn(`⚠️ Reached safety limit of 1000 deals`);
+          break;
+        }
+      }
+
+      console.log(`✅ Fetched ${allDeals.length} HubSpot deals for analytics`);
+      return allDeals;
+
+    } catch (error) {
+      console.error(`❌ Failed to fetch HubSpot deals for analytics:`, error.response?.data?.message || error.message);
+      throw error;
+    }
+  }
 }
 
 /**
@@ -1845,6 +1918,7 @@ app.get("/meta", async (req, res) => {
       },
       endpoints: {
         graphql: ["/orders", "/orders/:id"],
+        analytics: ["/analytics-data"],
         rest: ["/rest/orders/:id", "/rest/locations"],
         metafields: ["/metafields"],
         files: ["/upload-file"],
@@ -2843,6 +2917,169 @@ app.get("/rest/locations", async (req, res) => {
     res.json(locationsData);
   } catch (error) {
     handleError(error, res, "REST locations fetch failed");
+  }
+});
+
+/**
+ * Analytics data endpoint - serves HubSpot deals + Shopify fallback data
+ */
+app.get("/analytics-data", async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    console.log("📊 Analytics data request received");
+    
+    const { startDate, endDate, source } = req.query;
+    
+    let dateRange = null;
+    if (startDate && endDate) {
+      dateRange = { startDate, endDate };
+      console.log(`📅 Date range filter: ${startDate} to ${endDate}`);
+    }
+    
+    let analyticsData = {
+      source: 'fallback', // Default fallback
+      orders: [],
+      total_count: 0,
+      hubspot_available: !!hubspotClient
+    };
+    
+    // Try HubSpot first if available and not explicitly requesting fallback
+    if (hubspotClient && source !== 'shopify') {
+      try {
+        console.log("🎯 Attempting to fetch HubSpot deals data...");
+        
+        const hubspotDeals = await hubspotClient.getDealsForAnalytics(dateRange);
+        
+        // Transform HubSpot deals to Shopify order format for compatibility
+        const transformedOrders = hubspotDeals.map(deal => {
+          const props = deal.properties;
+          return {
+            id: props.shopify_order_id || deal.id,
+            name: props.shopify_order_number || props.dealname,
+            created_at: props.createdate || deal.createdAt,
+            total_price: props.shopify_total_inc_gst || props.amount || '0',
+            total_price_ex_gst: props.shopify_total_ex_gst || '0',
+            subtotal_price: props.shopify_subtotal || '0',
+            total_tax: props.shopify_gst_amount || '0',
+            total_shipping_price_set: {
+              shop_money: {
+                amount: props.shopify_shipping_cost || '0'
+              }
+            },
+            currency: props.hs_deal_currency_code || 'AUD',
+            financial_status: 'paid', // All HubSpot deals are closed won
+            fulfillment_status: 'fulfilled',
+            customer: {
+              email: `hubspot-deal-${deal.id}@exposurepack.com.au`
+            },
+            line_items: [], // Could be enhanced later with associated line items
+            tags: ['hubspot-import'],
+            
+            // Additional HubSpot metadata
+            hubspot_deal_id: deal.id,
+            hubspot_deal_stage: props.dealstage,
+            deal_source: props.deal_source || 'HubSpot',
+            data_source: 'hubspot'
+          };
+        });
+        
+        analyticsData = {
+          source: 'hubspot',
+          orders: transformedOrders,
+          total_count: transformedOrders.length,
+          hubspot_available: true,
+          deals_fetched: hubspotDeals.length
+        };
+        
+        console.log(`✅ HubSpot data: ${hubspotDeals.length} deals transformed to orders`);
+        
+      } catch (hubspotError) {
+        console.error("❌ HubSpot fetch failed, falling back to Shopify data:", hubspotError.message);
+        
+        // Fall back to Shopify data
+        analyticsData.hubspot_error = hubspotError.message;
+      }
+    }
+    
+    // If no HubSpot data, fetch from Shopify as fallback
+    if (analyticsData.source === 'fallback') {
+      try {
+        console.log("🛒 Fetching Shopify orders as fallback...");
+        
+        // Use the same fetchAllOrders logic but through direct API call
+        const shopifyResponse = await fetch(`${process.env.SHOPIFY_STORE_URL ? `https://${process.env.SHOPIFY_STORE_URL}` : 'https://exposurepack-myshopify-com.myshopify.com'}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=250&status=any`, {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          }
+        });
+        
+        if (shopifyResponse.ok) {
+          const shopifyData = await shopifyResponse.json();
+          
+          // Filter by date range if provided
+          let orders = shopifyData.orders || [];
+          if (dateRange) {
+            const start = new Date(dateRange.startDate);
+            const end = new Date(dateRange.endDate);
+            orders = orders.filter(order => {
+              const orderDate = new Date(order.created_at);
+              return orderDate >= start && orderDate <= end;
+            });
+          }
+          
+          analyticsData = {
+            source: 'shopify',
+            orders: orders,
+            total_count: orders.length,
+            hubspot_available: !!hubspotClient,
+            shopify_total_available: shopifyData.orders?.length || 0
+          };
+          
+          console.log(`✅ Shopify fallback: ${orders.length} orders`);
+        } else {
+          throw new Error(`Shopify API error: ${shopifyResponse.status}`);
+        }
+        
+      } catch (shopifyError) {
+        console.error("❌ Shopify fallback failed:", shopifyError.message);
+        
+        // Last resort: return empty data with error info
+        analyticsData = {
+          source: 'error',
+          orders: [],
+          total_count: 0,
+          hubspot_available: !!hubspotClient,
+          errors: {
+            shopify: shopifyError.message,
+            hubspot: analyticsData.hubspot_error
+          }
+        };
+      }
+    }
+    
+    const processingTime = Date.now() - startTime;
+    
+    res.json({
+      ...analyticsData,
+      timestamp: new Date().toISOString(),
+      processing_time_ms: processingTime
+    });
+    
+    console.log(`⏱️ Analytics request completed in ${processingTime}ms - Source: ${analyticsData.source}`);
+    
+  } catch (error) {
+    const processingTime = Date.now() - startTime;
+    console.error("❌ Analytics endpoint error:", error.message);
+    
+    res.status(500).json({
+      source: 'error',
+      orders: [],
+      total_count: 0,
+      hubspot_available: !!hubspotClient,
+      error: error.message,
+      processing_time_ms: processingTime
+    });
   }
 });
 
