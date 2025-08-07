@@ -1076,23 +1076,53 @@ async function createHubSpotDealFromShopifyOrder(order) {
     const billingAddress = order.billing_address || {};
     const shippingAddress = order.shipping_address || {};
 
-    // Prepare contact data
+    // Prepare contact data with separate billing and shipping addresses
     const contactData = {
       email: customer.email || billingAddress.email || 'unknown@shopify.com',
       firstname: customer.first_name || billingAddress.first_name || '',
       lastname: customer.last_name || billingAddress.last_name || '',
       phone: customer.phone || billingAddress.phone || '',
-      address: billingAddress.address1 || '',
-      city: billingAddress.city || '',
-      state: billingAddress.province || '',
-      country: billingAddress.country || '',
-      zip: billingAddress.zip || '',
-      company: billingAddress.company || ''
+      company: billingAddress.company || shippingAddress.company || '',
+      
+      // Default contact address (use shipping address as primary, fallback to billing)
+      address: shippingAddress.address1 || billingAddress.address1 || '',
+      city: shippingAddress.city || billingAddress.city || '',
+      state: shippingAddress.province || billingAddress.province || '',
+      country: shippingAddress.country || billingAddress.country || '',
+      zip: shippingAddress.zip || billingAddress.zip || '',
+      
+      // Billing address fields
+      billing_address: billingAddress.address1 || '',
+      billing_city: billingAddress.city || '',
+      billing_state: billingAddress.province || '',
+      billing_country: billingAddress.country || '',
+      billing_zip: billingAddress.zip || '',
+      billing_company: billingAddress.company || '',
+      billing_first_name: billingAddress.first_name || '',
+      billing_last_name: billingAddress.last_name || '',
+      
+      // Shipping address fields
+      shipping_address: shippingAddress.address1 || '',
+      shipping_city: shippingAddress.city || '',
+      shipping_state: shippingAddress.province || '',
+      shipping_country: shippingAddress.country || '',
+      shipping_zip: shippingAddress.zip || '',
+      shipping_company: shippingAddress.company || '',
+      shipping_first_name: shippingAddress.first_name || '',
+      shipping_last_name: shippingAddress.last_name || ''
     };
 
     // Create or update contact in HubSpot
     let contact;
     try {
+      // Log address details being sent to HubSpot
+      console.log(`📧 Contact data being sent to HubSpot:`);
+      console.log(`   Email: ${contactData.email}`);
+      console.log(`   Name: ${contactData.firstname} ${contactData.lastname}`);
+      console.log(`   Company: ${contactData.company}`);
+      console.log(`   Billing Address: ${contactData.billing_address}, ${contactData.billing_city}, ${contactData.billing_state} ${contactData.billing_zip}`);
+      console.log(`   Shipping Address: ${contactData.shipping_address}, ${contactData.shipping_city}, ${contactData.shipping_state} ${contactData.shipping_zip}`);
+      
       contact = await hubspotClient.createOrUpdateContact(contactData);
       console.log(`👤 Contact ready: ${contact.id} - ${contactData.email}`);
     } catch (contactError) {
