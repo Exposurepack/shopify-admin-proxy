@@ -1664,6 +1664,23 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         province: 'QLD',
         zip: '4812'
       },
+      // Stefan Locasto / ExposurePack - Deal ID: 40735781445
+      '40735781445': {
+        billing: {
+          company: 'ExposurePack',
+          address1: '3 hudson st',
+          city: 'Caulfield north',
+          province: 'VIC',
+          zip: '3161'
+        },
+        shipping: {
+          company: 'ExposurePack',
+          address1: '2 Bataba St',
+          city: 'Moorabbin',
+          province: 'VIC',
+          zip: '3189'
+        }
+      },
       // Email based addresses
       'admin@thehoi.com.au': {
         company: 'The hoi polloi', 
@@ -1671,6 +1688,22 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         city: 'Townsville',
         province: 'QLD',
         zip: '4812'
+      },
+      'stefan@exposurepack.com.au': {
+        billing: {
+          company: 'ExposurePack',
+          address1: '3 hudson st',
+          city: 'Caulfield north',
+          province: 'VIC',
+          zip: '3161'
+        },
+        shipping: {
+          company: 'ExposurePack',
+          address1: '2 Bataba St',
+          city: 'Moorabbin',
+          province: 'VIC',
+          zip: '3189'
+        }
       },
       'info@alfabakehouse.com.au': {
         company: 'Alfa Bakehouse',
@@ -1688,20 +1721,59 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     
     if (knownAddress) {
       console.log(`🔧 Applying manual address override for ${dealKey} / ${emailKey}`);
-      const manualAddress = {
-        first_name: firstName,
-        last_name: lastName,
-                   company: knownAddress.company || companyName,
-        address1: knownAddress.address1,
-        city: knownAddress.city,
-        province: knownAddress.province,
-        country: 'Australia',
-        zip: knownAddress.zip,
-        phone: formattedPhone
-      };
-      shippingAddress = manualAddress;
-      billingAddress = manualAddress;
-      console.log(`🔧 Manual address applied:`, manualAddress);
+      
+      // Check if this is the new structure with separate billing/shipping
+      if (knownAddress.billing && knownAddress.shipping) {
+        console.log(`📍 Found separate billing and shipping addresses`);
+        
+        const manualBillingAddress = {
+          first_name: firstName,
+          last_name: lastName,
+          company: knownAddress.billing.company || companyName,
+          address1: knownAddress.billing.address1,
+          city: knownAddress.billing.city,
+          province: knownAddress.billing.province,
+          country: 'Australia',
+          zip: knownAddress.billing.zip,
+          phone: formattedPhone
+        };
+        
+        const manualShippingAddress = {
+          first_name: firstName,
+          last_name: lastName,
+          company: knownAddress.shipping.company || companyName,
+          address1: knownAddress.shipping.address1,
+          city: knownAddress.shipping.city,
+          province: knownAddress.shipping.province,
+          country: 'Australia',
+          zip: knownAddress.shipping.zip,
+          phone: formattedPhone
+        };
+        
+        billingAddress = manualBillingAddress;
+        shippingAddress = manualShippingAddress;
+        
+        console.log(`🔧 Manual billing address applied:`, manualBillingAddress);
+        console.log(`🔧 Manual shipping address applied:`, manualShippingAddress);
+        
+      } else {
+        // Legacy format - use same address for both billing and shipping
+        console.log(`📍 Found legacy single address format`);
+        const manualAddress = {
+          first_name: firstName,
+          last_name: lastName,
+          company: knownAddress.company || companyName,
+          address1: knownAddress.address1,
+          city: knownAddress.city,
+          province: knownAddress.province,
+          country: 'Australia',
+          zip: knownAddress.zip,
+          phone: formattedPhone
+        };
+        shippingAddress = manualAddress;
+        billingAddress = manualAddress;
+        console.log(`🔧 Manual address applied (legacy format):`, manualAddress);
+      }
     } else {
       console.log(`⚠️ No manual address found for deal ${dealKey} or email ${emailKey}`);
       console.log(`📝 Consider adding address manually to knownAddresses database`);
@@ -1714,6 +1786,9 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       if (address === invoiceShippingAddress) return 'Invoice Shipping';
       if (address === invoiceBillingAddress) return isShipping ? 'Invoice Billing (fallback)' : 'Invoice Billing';
       if (address === contactAddress) return 'Contact';
+      if (knownAddress && knownAddress.billing && knownAddress.shipping) {
+        return isShipping ? 'Manual Shipping Override' : 'Manual Billing Override';
+      }
       return 'Manual Override';
     };
     
