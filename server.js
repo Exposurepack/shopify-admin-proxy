@@ -3110,41 +3110,81 @@ app.get("/analytics-data", async (req, res) => {
     // If no HubSpot data, fetch from Shopify as fallback
     if (analyticsData.source === 'fallback') {
       try {
-        console.log("🛒 Fetching Shopify orders as fallback...");
+        console.log("🛒 Fetching all Shopify orders as fallback...");
         
-        // Use the same fetchAllOrders logic but through direct API call
-        const shopifyResponse = await fetch(`${process.env.SHOPIFY_STORE_URL ? `https://${process.env.SHOPIFY_STORE_URL}` : 'https://exposurepack-myshopify-com.myshopify.com'}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=250&status=any`, {
-          headers: {
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        // Fetch ALL orders with pagination to ensure we get complete data
+        let allShopifyOrders = [];
+        let nextPageUrl = `${process.env.SHOPIFY_STORE_URL ? `https://${process.env.SHOPIFY_STORE_URL}` : 'https://exposurepack-myshopify-com.myshopify.com'}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=250&status=any`;
+        let pageCount = 0;
+        const maxPages = 20; // Safety limit to prevent infinite loops
+        
+        while (nextPageUrl && pageCount < maxPages) {
+          pageCount++;
+          console.log(`📄 Fetching Shopify page ${pageCount}...`);
+          
+          const shopifyResponse = await fetch(nextPageUrl, {
+            headers: {
+              'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+            }
+          });
+          
+          if (!shopifyResponse.ok) {
+            throw new Error(`Shopify API error: ${shopifyResponse.status}`);
           }
-        });
-        
-        if (shopifyResponse.ok) {
+          
           const shopifyData = await shopifyResponse.json();
+          const pageOrders = shopifyData.orders || [];
           
-          // Filter by date range if provided
-          let orders = shopifyData.orders || [];
-          if (dateRange) {
-            const start = new Date(dateRange.startDate);
-            const end = new Date(dateRange.endDate);
-            orders = orders.filter(order => {
-              const orderDate = new Date(order.created_at);
-              return orderDate >= start && orderDate <= end;
-            });
+          allShopifyOrders = allShopifyOrders.concat(pageOrders);
+          console.log(`✅ Page ${pageCount}: ${pageOrders.length} orders, Total: ${allShopifyOrders.length}`);
+          
+          // Check for next page link in headers
+          const linkHeader = shopifyResponse.headers.get('Link');
+          nextPageUrl = null;
+          
+          if (linkHeader) {
+            const links = linkHeader.split(',');
+            for (const link of links) {
+              if (link.includes('rel="next"')) {
+                const urlMatch = link.match(/<([^>]+)>/);
+                if (urlMatch) {
+                  nextPageUrl = urlMatch[1];
+                  break;
+                }
+              }
+            }
           }
           
-          analyticsData = {
-            source: 'shopify',
-            orders: orders,
-            total_count: orders.length,
-            hubspot_available: !!hubspotClient,
-            shopify_total_available: shopifyData.orders?.length || 0
-          };
-          
-          console.log(`✅ Shopify fallback: ${orders.length} orders`);
-        } else {
-          throw new Error(`Shopify API error: ${shopifyResponse.status}`);
+          // If no more orders on this page, stop pagination
+          if (pageOrders.length === 0) {
+            break;
+          }
         }
+        
+        console.log(`📊 Fetched all Shopify orders: ${allShopifyOrders.length} total orders across ${pageCount} pages`);
+        
+        // Filter by date range if provided
+        let orders = allShopifyOrders;
+        if (dateRange) {
+          const start = new Date(dateRange.startDate);
+          const end = new Date(dateRange.endDate);
+          orders = orders.filter(order => {
+            const orderDate = new Date(order.created_at);
+            return orderDate >= start && orderDate <= end;
+          });
+          console.log(`📅 Filtered to date range: ${orders.length} orders`);
+        }
+        
+        analyticsData = {
+          source: 'shopify',
+          orders: orders,
+          total_count: orders.length,
+          hubspot_available: !!hubspotClient,
+          shopify_total_available: allShopifyOrders.length,
+          pages_fetched: pageCount
+        };
+        
+        console.log(`✅ Shopify fallback complete: ${orders.length} orders for analytics`);
         
       } catch (shopifyError) {
         console.error("❌ Shopify fallback failed:", shopifyError.message);
