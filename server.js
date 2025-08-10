@@ -932,74 +932,122 @@ class HubSpotClient {
 
   async getDealsForAnalytics(dateRange = null) {
     try {
-      console.log(`📊 Fetching HubSpot deals for analytics...`);
+      console.log(`📊 Fetching HubSpot closed-won deals for analytics...`);
+      if (dateRange) {
+        console.log(`📅 Date range: ${dateRange.startDate} to ${dateRange.endDate}`);
+      }
       
-      const params = {
-        properties: [
-          'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
-          'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
-          'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
-          'shopify_order_id', 'deal_source', 'hs_deal_currency_code'
-        ].join(','),
-        limit: 100
-      };
+      // Build filter groups for closed-won deals
+      const filterGroups = [{
+        filters: [
+          {
+            propertyName: 'dealstage',
+            operator: 'EQ',
+            value: 'closedwon'
+          }
+        ]
+      }];
 
-      // Add date filter if provided
+      // Add date filter if provided (use closedate for analytics time window)
       if (dateRange && dateRange.startDate && dateRange.endDate) {
         const startTimestamp = new Date(dateRange.startDate).getTime();
         const endTimestamp = new Date(dateRange.endDate).getTime();
         
-        params.filterGroups = JSON.stringify([{
-          filters: [
-            {
-              propertyName: 'createdate',
-              operator: 'BETWEEN',
-              highValue: endTimestamp,
-              value: startTimestamp
-            }
-          ]
-        }]);
+        filterGroups[0].filters.push({
+          propertyName: 'closedate',
+          operator: 'BETWEEN',
+          highValue: endTimestamp,
+          value: startTimestamp
+        });
       }
+
+      // Enhanced properties to fetch more deal data
+      const properties = [
+        'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
+        'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
+        'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
+        'shopify_order_id', 'deal_source', 'hs_deal_currency_code',
+        'hubspot_owner_id', 'deal_currency_code', 'hs_object_id'
+      ];
 
       let allDeals = [];
       let hasMore = true;
       let after = 0;
+      let pageCount = 0;
 
       while (hasMore) {
-        params.after = after;
+        pageCount++;
+        console.log(`📄 Fetching page ${pageCount} of closed-won deals...`);
         
         const response = await axios.post(
           `${this.baseURL}/crm/v3/objects/deals/search`,
           {
-            filterGroups: params.filterGroups ? JSON.parse(params.filterGroups) : [],
-            properties: params.properties.split(','),
-            limit: params.limit,
-            after: params.after
+            filterGroups: filterGroups,
+            properties: properties,
+            limit: 100,
+            after: after
           },
           { headers: this.headers }
         );
 
         const deals = response.data.results || [];
-        allDeals = allDeals.concat(deals);
         
-        console.log(`📄 Fetched ${deals.length} deals, total: ${allDeals.length}`);
+        // Filter out deals without amount or with $0 amount for better analytics
+        const validDeals = deals.filter(deal => {
+          const amount = parseFloat(deal.properties.amount || deal.properties.shopify_total_inc_gst || 0);
+          return amount > 0;
+        });
+        
+        allDeals = allDeals.concat(validDeals);
+        
+        console.log(`📄 Page ${pageCount}: ${deals.length} fetched, ${validDeals.length} valid (amount > 0), total: ${allDeals.length}`);
         
         hasMore = response.data.paging?.next?.after;
         after = hasMore;
         
-        // Safety limit
-        if (allDeals.length > 1000) {
-          console.warn(`⚠️ Reached safety limit of 1000 deals`);
+        // Safety limit to prevent infinite loops
+        if (pageCount >= 50) {
+          console.warn(`⚠️ Reached safety limit of 50 pages`);
           break;
         }
       }
 
-      console.log(`✅ Fetched ${allDeals.length} HubSpot deals for analytics`);
+      // Log summary
+      console.log(`✅ Fetched ${allDeals.length} closed-won HubSpot deals for analytics across ${pageCount} pages`);
+      
+      // Log some sample data for verification
+      if (allDeals.length > 0) {
+        const sampleDeal = allDeals[0];
+        console.log(`📋 Sample deal data:`, {
+          id: sampleDeal.id,
+          name: sampleDeal.properties.dealname,
+          amount: sampleDeal.properties.amount,
+          shopify_total: sampleDeal.properties.shopify_total_inc_gst,
+          closedate: sampleDeal.properties.closedate,
+          stage: sampleDeal.properties.dealstage
+        });
+      }
+      
       return allDeals;
 
     } catch (error) {
-      console.error(`❌ Failed to fetch HubSpot deals for analytics:`, error.response?.data?.message || error.message);
-      throw error;
+      console.error(`❌ Failed to fetch HubSpot deals for analytics:`, {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        responseData: error.response?.data
+      });
+      
+      // Provide more specific error context
+      if (error.response?.status === 401) {
+        throw new Error(`HubSpot authentication failed. Check your HUBSPOT_PRIVATE_APP_TOKEN.`);
+      } else if (error.response?.status === 403) {
+        throw new Error(`HubSpot access denied. Ensure your token has deals read permissions.`);
+      } else if (error.response?.status === 429) {
+        throw new Error(`HubSpot rate limit exceeded. Please try again in a few minutes.`);
+      } else {
+        throw new Error(`HubSpot API error: ${error.response?.data?.message || error.message}`);
+      }
     }
   }
 }
