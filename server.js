@@ -269,22 +269,78 @@ class ShopifyRESTClient {
       "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
       "Content-Type": "application/json"
     };
+    // Basic rate limiting to respect Shopify REST limits (2 rps for this app)
+    this._lastRequestTimeMs = 0;
+    this._minIntervalMs = 600; // be conservative vs 500ms
   }
 
   async get(endpoint) {
-    const response = await axios.get(`${this.baseURL}${endpoint}`, {
-      headers: this.headers,
-      timeout: 30000
-    });
-    return response.data;
+    return this._requestWithRateLimit('get', endpoint);
   }
 
   async post(endpoint, data) {
-    const response = await axios.post(`${this.baseURL}${endpoint}`, data, {
-      headers: this.headers,
-      timeout: 30000
-    });
-    return response.data;
+    return this._requestWithRateLimit('post', endpoint, data);
+  }
+
+  async _delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async _requestWithRateLimit(method, endpoint, data) {
+    // Enforce minimum spacing between requests
+    const now = Date.now();
+    const since = now - this._lastRequestTimeMs;
+    if (since < this._minIntervalMs) {
+      await this._delay(this._minIntervalMs - since);
+    }
+
+    let attempt = 0;
+    const maxAttempts = 5;
+    let lastError;
+    
+    while (attempt < maxAttempts) {
+      try {
+        this._lastRequestTimeMs = Date.now();
+        const axiosConfig = { headers: this.headers, timeout: 30000 };
+        let response;
+        if (method === 'get') {
+          response = await axios.get(`${this.baseURL}${endpoint}`, axiosConfig);
+        } else if (method === 'post') {
+          response = await axios.post(`${this.baseURL}${endpoint}`, data, axiosConfig);
+        } else {
+          throw new Error(`Unsupported method: ${method}`);
+        }
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        const status = error.response?.status;
+        if (status === 429) {
+          // Respect Retry-After header if present
+          const retryAfterHeader = error.response?.headers?.['retry-after'];
+          const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : null;
+          // Exponential backoff with jitter, minimum 1s, respect retry-after if provided
+          const baseDelay = Math.min(5000, Math.pow(2, attempt) * 500);
+          const jitter = Math.floor(Math.random() * 250);
+          const delayMs = Math.max(1000, (retryAfterSec ? retryAfterSec * 1000 : baseDelay) + jitter);
+          console.warn(`⏳ Rate limited by Shopify (429). Retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts}) for ${endpoint}`);
+          await this._delay(delayMs);
+          attempt += 1;
+          continue;
+        }
+        // For network timeouts or 5xx, retry a couple of times
+        if (status >= 500 || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
+          const backoff = Math.min(5000, Math.pow(2, attempt) * 300);
+          console.warn(`⚠️ Temporary Shopify error (${status || error.code}). Retrying in ${backoff}ms (attempt ${attempt + 1}/${maxAttempts}) for ${endpoint}`);
+          await this._delay(backoff);
+          attempt += 1;
+          continue;
+        }
+        // Non-retriable
+        throw error;
+      }
+    }
+    // Exhausted retries
+    throw lastError;
   }
 }
 
