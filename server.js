@@ -3166,7 +3166,8 @@ app.get("/analytics-data", async (req, res) => {
           return {
             id: props.shopify_order_id || deal.id,
             name: props.shopify_order_number || props.dealname,
-            created_at: props.createdate || deal.createdAt,
+            // Prefer closedate so charts reflect when revenue is won; fallback to createdate
+            created_at: props.closedate || props.createdate || deal.createdAt,
             total_price: props.shopify_total_inc_gst || props.amount || '0',
             total_price_ex_gst: props.shopify_total_ex_gst || '0',
             subtotal_price: props.shopify_subtotal || '0',
