@@ -3098,6 +3098,40 @@ app.post("/rest/customers/:id/tags", async (req, res) => {
   }
 });
 
+// Same functionality without /rest prefix for storefront path compatibility
+app.get("/customers/search", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: "Missing email query param" });
+    const query = `email:${email}`;
+    console.log(`🔄 (no-rest) searching customer by email: ${email}`);
+    const searchData = await restClient.get(`/customers/search.json?query=${encodeURIComponent(query)}`);
+    const customer = Array.isArray(searchData?.customers) && searchData.customers.length > 0 ? searchData.customers[0] : null;
+    res.json({ customer, count: searchData?.customers?.length || 0 });
+  } catch (error) {
+    handleError(error, res, "(no-rest) customer search failed");
+  }
+});
+
+app.post("/customers/:id/tags", async (req, res) => {
+  try {
+    const { id } = req.params; const { tier } = req.body || {};
+    if (!id || !tier) return res.status(400).json({ error: "Missing id or tier" });
+    const normalizedId = String(id).replace(/\D+/g, "");
+    const allowed = ["bronze", "silver", "gold"]; const t = String(tier).toLowerCase();
+    if (!allowed.includes(t)) return res.status(400).json({ error: "Invalid tier" });
+    const current = await restClient.get(`/customers/${normalizedId}.json`);
+    const existingTags = (current?.customer?.tags || "").split(",").map(s=>s.trim()).filter(Boolean);
+    const filtered = existingTags.filter(x => !allowed.includes(x.toLowerCase()));
+    if (!filtered.map(x=>x.toLowerCase()).includes(t)) filtered.push(t);
+    const payload = { customer: { id: Number(normalizedId), tags: filtered.join(", ") } };
+    const updateRes = await restClient.put(`/customers/${normalizedId}.json`, payload);
+    res.json({ ok: true, updated: updateRes?.customer?.tags || filtered.join(", ") });
+  } catch (error) {
+    handleError(error, res, "(no-rest) customer tag update failed");
+  }
+});
+
 /**
  * Analytics data endpoint - serves HubSpot deals + Shopify fallback data
  */
