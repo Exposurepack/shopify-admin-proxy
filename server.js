@@ -3135,12 +3135,44 @@ app.post("/customers/:id/tags", async (req, res) => {
 /**
  * Analytics data endpoint - serves HubSpot deals + Shopify fallback data
  */
-app.get("/analytics-data", async (req, res) => {
+app.all("/analytics-data", async (req, res) => {
   const startTime = Date.now();
   
   try {
-    console.log("📊 Analytics data request received");
+    console.log("📊 Analytics data request received", req.method, req.query);
     
+    // Lightweight ops routed through the known path to avoid CORS/404 issues
+    if (req.method === 'GET' && req.query.op === 'searchCustomer') {
+      const email = req.query.email;
+      if (!email) return res.status(400).json({ error: 'Missing email' });
+      try {
+        const query = `email:${email}`;
+        const searchData = await restClient.get(`/customers/search.json?query=${encodeURIComponent(query)}`);
+        const customer = Array.isArray(searchData?.customers) && searchData.customers.length > 0 ? searchData.customers[0] : null;
+        return res.json({ customer, count: searchData?.customers?.length || 0 });
+      } catch (err) {
+        return handleError(err, res, 'analytics-data searchCustomer failed');
+      }
+    }
+    if (req.method === 'POST' && req.query.op === 'tagCustomer') {
+      const { id, tier } = req.body || {};
+      if (!id || !tier) return res.status(400).json({ error: 'Missing id or tier' });
+      try {
+        const normalizedId = String(id).replace(/\D+/g, "");
+        const allowed = ["bronze","silver","gold"]; const t = String(tier).toLowerCase();
+        if (!allowed.includes(t)) return res.status(400).json({ error: 'Invalid tier' });
+        const current = await restClient.get(`/customers/${normalizedId}.json`);
+        const existingTags = (current?.customer?.tags || "").split(",").map(s=>s.trim()).filter(Boolean);
+        const filtered = existingTags.filter(x=>!allowed.includes(x.toLowerCase()));
+        if (!filtered.map(x=>x.toLowerCase()).includes(t)) filtered.push(t);
+        const payload = { customer: { id: Number(normalizedId), tags: filtered.join(", ") } };
+        const updateRes = await restClient.put(`/customers/${normalizedId}.json`, payload);
+        return res.json({ ok:true, updated: updateRes?.customer?.tags || filtered.join(", ") });
+      } catch (err) {
+        return handleError(err, res, 'analytics-data tagCustomer failed');
+      }
+    }
+
     const { startDate, endDate, source } = req.query;
     
     let dateRange = null;
