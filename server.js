@@ -269,78 +269,22 @@ class ShopifyRESTClient {
       "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
       "Content-Type": "application/json"
     };
-    // Basic rate limiting to respect Shopify REST limits (2 rps for this app)
-    this._lastRequestTimeMs = 0;
-    this._minIntervalMs = 600; // be conservative vs 500ms
   }
 
   async get(endpoint) {
-    return this._requestWithRateLimit('get', endpoint);
+    const response = await axios.get(`${this.baseURL}${endpoint}`, {
+      headers: this.headers,
+      timeout: 30000
+    });
+    return response.data;
   }
 
   async post(endpoint, data) {
-    return this._requestWithRateLimit('post', endpoint, data);
-  }
-
-  async _delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  async _requestWithRateLimit(method, endpoint, data) {
-    // Enforce minimum spacing between requests
-    const now = Date.now();
-    const since = now - this._lastRequestTimeMs;
-    if (since < this._minIntervalMs) {
-      await this._delay(this._minIntervalMs - since);
-    }
-
-    let attempt = 0;
-    const maxAttempts = 5;
-    let lastError;
-    
-    while (attempt < maxAttempts) {
-      try {
-        this._lastRequestTimeMs = Date.now();
-        const axiosConfig = { headers: this.headers, timeout: 30000 };
-        let response;
-        if (method === 'get') {
-          response = await axios.get(`${this.baseURL}${endpoint}`, axiosConfig);
-        } else if (method === 'post') {
-          response = await axios.post(`${this.baseURL}${endpoint}`, data, axiosConfig);
-        } else {
-          throw new Error(`Unsupported method: ${method}`);
-        }
-        return response.data;
-      } catch (error) {
-        lastError = error;
-        const status = error.response?.status;
-        if (status === 429) {
-          // Respect Retry-After header if present
-          const retryAfterHeader = error.response?.headers?.['retry-after'];
-          const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : null;
-          // Exponential backoff with jitter, minimum 1s, respect retry-after if provided
-          const baseDelay = Math.min(5000, Math.pow(2, attempt) * 500);
-          const jitter = Math.floor(Math.random() * 250);
-          const delayMs = Math.max(1000, (retryAfterSec ? retryAfterSec * 1000 : baseDelay) + jitter);
-          console.warn(`⏳ Rate limited by Shopify (429). Retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts}) for ${endpoint}`);
-          await this._delay(delayMs);
-          attempt += 1;
-          continue;
-        }
-        // For network timeouts or 5xx, retry a couple of times
-        if (status >= 500 || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
-          const backoff = Math.min(5000, Math.pow(2, attempt) * 300);
-          console.warn(`⚠️ Temporary Shopify error (${status || error.code}). Retrying in ${backoff}ms (attempt ${attempt + 1}/${maxAttempts}) for ${endpoint}`);
-          await this._delay(backoff);
-          attempt += 1;
-          continue;
-        }
-        // Non-retriable
-        throw error;
-      }
-    }
-    // Exhausted retries
-    throw lastError;
+    const response = await axios.post(`${this.baseURL}${endpoint}`, data, {
+      headers: this.headers,
+      timeout: 30000
+    });
+    return response.data;
   }
 }
 
@@ -988,122 +932,74 @@ class HubSpotClient {
 
   async getDealsForAnalytics(dateRange = null) {
     try {
-      console.log(`📊 Fetching HubSpot closed-won deals for analytics...`);
-      if (dateRange) {
-        console.log(`📅 Date range: ${dateRange.startDate} to ${dateRange.endDate}`);
-      }
+      console.log(`📊 Fetching HubSpot deals for analytics...`);
       
-      // Build filter groups for closed-won deals
-      const filterGroups = [{
-        filters: [
-          {
-            propertyName: 'dealstage',
-            operator: 'EQ',
-            value: 'closedwon'
-          }
-        ]
-      }];
+      const params = {
+        properties: [
+          'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
+          'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
+          'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
+          'shopify_order_id', 'deal_source', 'hs_deal_currency_code'
+        ].join(','),
+        limit: 100
+      };
 
-      // Add date filter if provided (use closedate for analytics time window)
+      // Add date filter if provided
       if (dateRange && dateRange.startDate && dateRange.endDate) {
         const startTimestamp = new Date(dateRange.startDate).getTime();
         const endTimestamp = new Date(dateRange.endDate).getTime();
         
-        filterGroups[0].filters.push({
-          propertyName: 'closedate',
-          operator: 'BETWEEN',
-          highValue: endTimestamp,
-          value: startTimestamp
-        });
+        params.filterGroups = JSON.stringify([{
+          filters: [
+            {
+              propertyName: 'createdate',
+              operator: 'BETWEEN',
+              highValue: endTimestamp,
+              value: startTimestamp
+            }
+          ]
+        }]);
       }
-
-      // Enhanced properties to fetch more deal data
-      const properties = [
-        'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
-        'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
-        'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
-        'shopify_order_id', 'deal_source', 'hs_deal_currency_code',
-        'hubspot_owner_id', 'deal_currency_code', 'hs_object_id'
-      ];
 
       let allDeals = [];
       let hasMore = true;
       let after = 0;
-      let pageCount = 0;
 
       while (hasMore) {
-        pageCount++;
-        console.log(`📄 Fetching page ${pageCount} of closed-won deals...`);
+        params.after = after;
         
         const response = await axios.post(
           `${this.baseURL}/crm/v3/objects/deals/search`,
           {
-            filterGroups: filterGroups,
-            properties: properties,
-            limit: 100,
-            after: after
+            filterGroups: params.filterGroups ? JSON.parse(params.filterGroups) : [],
+            properties: params.properties.split(','),
+            limit: params.limit,
+            after: params.after
           },
           { headers: this.headers }
         );
 
         const deals = response.data.results || [];
+        allDeals = allDeals.concat(deals);
         
-        // Filter out deals without amount or with $0 amount for better analytics
-        const validDeals = deals.filter(deal => {
-          const amount = parseFloat(deal.properties.amount || deal.properties.shopify_total_inc_gst || 0);
-          return amount > 0;
-        });
-        
-        allDeals = allDeals.concat(validDeals);
-        
-        console.log(`📄 Page ${pageCount}: ${deals.length} fetched, ${validDeals.length} valid (amount > 0), total: ${allDeals.length}`);
+        console.log(`📄 Fetched ${deals.length} deals, total: ${allDeals.length}`);
         
         hasMore = response.data.paging?.next?.after;
         after = hasMore;
         
-        // Safety limit to prevent infinite loops
-        if (pageCount >= 50) {
-          console.warn(`⚠️ Reached safety limit of 50 pages`);
+        // Safety limit
+        if (allDeals.length > 1000) {
+          console.warn(`⚠️ Reached safety limit of 1000 deals`);
           break;
         }
       }
 
-      // Log summary
-      console.log(`✅ Fetched ${allDeals.length} closed-won HubSpot deals for analytics across ${pageCount} pages`);
-      
-      // Log some sample data for verification
-      if (allDeals.length > 0) {
-        const sampleDeal = allDeals[0];
-        console.log(`📋 Sample deal data:`, {
-          id: sampleDeal.id,
-          name: sampleDeal.properties.dealname,
-          amount: sampleDeal.properties.amount,
-          shopify_total: sampleDeal.properties.shopify_total_inc_gst,
-          closedate: sampleDeal.properties.closedate,
-          stage: sampleDeal.properties.dealstage
-        });
-      }
-      
+      console.log(`✅ Fetched ${allDeals.length} HubSpot deals for analytics`);
       return allDeals;
 
     } catch (error) {
-      console.error(`❌ Failed to fetch HubSpot deals for analytics:`, {
-        message: error.message,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        responseData: error.response?.data
-      });
-      
-      // Provide more specific error context
-      if (error.response?.status === 401) {
-        throw new Error(`HubSpot authentication failed. Check your HUBSPOT_PRIVATE_APP_TOKEN.`);
-      } else if (error.response?.status === 403) {
-        throw new Error(`HubSpot access denied. Ensure your token has deals read permissions.`);
-      } else if (error.response?.status === 429) {
-        throw new Error(`HubSpot rate limit exceeded. Please try again in a few minutes.`);
-      } else {
-        throw new Error(`HubSpot API error: ${error.response?.data?.message || error.message}`);
-      }
+      console.error(`❌ Failed to fetch HubSpot deals for analytics:`, error.response?.data?.message || error.message);
+      throw error;
     }
   }
 }
@@ -3129,6 +3025,79 @@ app.get("/rest/locations", async (req, res) => {
   }
 });
 
+// Fetch a single customer by ID (returns tags among other fields)
+app.get("/rest/customers/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "Missing customer id" });
+    }
+    const normalizedId = String(id).replace(/\D+/g, "");
+    console.log(`🔄 REST: fetching customer ${normalizedId}`);
+    const customerData = await restClient.get(`/customers/${normalizedId}.json`);
+    res.json(customerData);
+  } catch (error) {
+    handleError(error, res, "REST customer fetch failed");
+  }
+});
+
+// Search customer by email (uses Admin REST customers/search)
+app.get("/rest/customers/search", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ error: "Missing email query param" });
+    }
+    const query = `email:${email}`;
+    console.log(`🔄 REST: searching customer by email: ${email}`);
+    const searchData = await restClient.get(`/customers/search.json?query=${encodeURIComponent(query)}`);
+    // Return first match if exists
+    const customer = Array.isArray(searchData?.customers) && searchData.customers.length > 0 ? searchData.customers[0] : null;
+    res.json({ customer, count: searchData?.customers?.length || 0 });
+  } catch (error) {
+    handleError(error, res, "REST customer search failed");
+  }
+});
+
+// Add or replace a membership tag (bronze/silver/gold) on a customer
+app.post("/rest/customers/:id/tags", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tier } = req.body || {};
+    if (!id || !tier) {
+      return res.status(400).json({ error: "Missing id or tier" });
+    }
+    const normalizedId = String(id).replace(/\D+/g, "");
+    const allowed = ["bronze", "silver", "gold"];
+    const tierLower = String(tier).toLowerCase();
+    if (!allowed.includes(tierLower)) {
+      return res.status(400).json({ error: "Invalid tier" });
+    }
+
+    console.log(`🏷️ Updating customer ${normalizedId} tags → ${tierLower}`);
+
+    // Get current tags
+    const current = await restClient.get(`/customers/${normalizedId}.json`);
+    const existingTags = (current?.customer?.tags || "").split(",").map(t => t.trim()).filter(Boolean);
+
+    // Remove other tier tags and add the requested one
+    const filtered = existingTags.filter(t => !allowed.includes(t.toLowerCase()));
+    if (!filtered.map(t => t.toLowerCase()).includes(tierLower)) filtered.push(tierLower);
+
+    const payload = {
+      customer: {
+        id: Number(normalizedId),
+        tags: filtered.join(", ")
+      }
+    };
+
+    const updateRes = await restClient.put(`/customers/${normalizedId}.json`, payload);
+    res.json({ ok: true, updated: updateRes?.customer?.tags || filtered.join(", ") });
+  } catch (error) {
+    handleError(error, res, "REST customer tag update failed");
+  }
+});
+
 /**
  * Analytics data endpoint - serves HubSpot deals + Shopify fallback data
  */
@@ -3166,8 +3135,7 @@ app.get("/analytics-data", async (req, res) => {
           return {
             id: props.shopify_order_id || deal.id,
             name: props.shopify_order_number || props.dealname,
-            // Prefer closedate so charts reflect when revenue is won; fallback to createdate
-            created_at: props.closedate || props.createdate || deal.createdAt,
+            created_at: props.createdate || deal.createdAt,
             total_price: props.shopify_total_inc_gst || props.amount || '0',
             total_price_ex_gst: props.shopify_total_ex_gst || '0',
             subtotal_price: props.shopify_subtotal || '0',
