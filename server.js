@@ -1002,6 +1002,42 @@ class HubSpotClient {
       throw error;
     }
   }
+
+  async deleteDeal(dealId) {
+    try {
+      const response = await axios.delete(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}`,
+        { headers: this.headers }
+      );
+      return response.data;
+    } catch (error) {
+      throw new Error(`Failed to delete HubSpot deal ${dealId}: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  async searchDealsByShopifyOrder(legacyId, orderName) {
+    try {
+      const filterGroups = [];
+      if (legacyId) {
+        filterGroups.push({
+          filters: [{ propertyName: 'shopify_order_id', operator: 'EQ', value: String(legacyId) }]
+        });
+      }
+      if (orderName) {
+        filterGroups.push({
+          filters: [{ propertyName: 'shopify_order_number', operator: 'EQ', value: String(orderName) }]
+        });
+      }
+      const response = await axios.post(
+        `${this.baseURL}/crm/v3/objects/deals/search`,
+        { filterGroups, properties: ['dealname','shopify_order_id','shopify_order_number'].join(','), limit: 100 },
+        { headers: this.headers }
+      );
+      return response.data.results || [];
+    } catch (error) {
+      throw new Error(`Failed to search HubSpot deals for order: ${error.response?.data?.message || error.message}`);
+    }
+  }
 }
 
 /**
@@ -2141,6 +2177,24 @@ app.post("/metafields", async (req, res) => {
 });
 
 /**
+ * Soft delete an order (mark as deleted via metafield). Does not touch HubSpot.
+ */
+app.post("/orders/:id/delete", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const legacyId = id.replace(/\D/g, '');
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+
+    // 1) Mark as deleted via metafield
+    await metafieldManager.setMetafield(orderGID, "custom", "deleted", "true", "single_line_text_field");
+
+    res.json({ success: true, id: legacyId });
+  } catch (error) {
+    handleError(error, res, "Failed to delete order");
+  }
+});
+
+/**
  * Test endpoint to verify server connectivity
  */
 app.get("/fulfillments/test", (req, res) => {
@@ -2675,7 +2729,7 @@ app.get("/orders", async (req, res) => {
                   }
                 }
               }
-              metafields(first: 20, namespace: "custom") {
+              metafields(first: 30, namespace: "custom") {
                 edges {
                   node {
                     key
@@ -2776,6 +2830,7 @@ app.get("/orders", async (req, res) => {
         shipping_address: node.shippingAddress,
         metafields,
         attributes: noteAttributes,
+        deleted: metafields.deleted === 'true' || metafields.deleted === true,
         // Smart display names (prioritizes custom attributes)
         display_business_name: businessName,
         display_customer_name: customerName,
@@ -2783,9 +2838,10 @@ app.get("/orders", async (req, res) => {
       };
     });
 
+    const filtered = transformedOrders.filter(o => !o.deleted);
     const response = {
-      orders: transformedOrders,
-      count: transformedOrders.length,
+      orders: filtered,
+      count: filtered.length,
       pagination: shouldPaginate ? {
         total_fetched: transformedOrders.length,
         method: "full_pagination"
