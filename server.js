@@ -3258,8 +3258,9 @@ app.all("/analytics-data", async (req, res) => {
             id: props.shopify_order_id || deal.id,
             name: props.shopify_order_number || props.dealname,
             created_at: props.createdate || deal.createdAt,
+            // amount in HubSpot deals is ex-GST in our integration; use it as fallback
             total_price: props.shopify_total_inc_gst || props.amount || '0',
-            total_price_ex_gst: props.shopify_total_ex_gst || '0',
+            total_price_ex_gst: props.shopify_total_ex_gst || props.amount || '0',
             subtotal_price: props.shopify_subtotal || '0',
             total_tax: props.shopify_gst_amount || '0',
             total_shipping_price_set: {
