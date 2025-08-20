@@ -939,27 +939,22 @@ class HubSpotClient {
           'dealname', 'amount', 'dealstage', 'closedate', 'createdate',
           'shopify_total_inc_gst', 'shopify_total_ex_gst', 'shopify_gst_amount',
           'shopify_subtotal', 'shopify_shipping_cost', 'shopify_order_number',
-          'shopify_order_id', 'deal_source', 'hs_deal_currency_code'
+          'shopify_order_id', 'deal_source', 'hs_deal_currency_code',
+          'hs_is_closed_won'
         ].join(','),
         limit: 100
       };
 
-      // Add date filter if provided
+      // Always restrict to closed-won deals, and use closedate for range filtering (matches HubSpot reports)
+      const filters = [
+        { propertyName: 'hs_is_closed_won', operator: 'EQ', value: 'true' }
+      ];
       if (dateRange && dateRange.startDate && dateRange.endDate) {
         const startTimestamp = new Date(dateRange.startDate).getTime();
         const endTimestamp = new Date(dateRange.endDate).getTime();
-        
-        params.filterGroups = JSON.stringify([{
-          filters: [
-            {
-              propertyName: 'createdate',
-              operator: 'BETWEEN',
-              highValue: endTimestamp,
-              value: startTimestamp
-            }
-          ]
-        }]);
+        filters.push({ propertyName: 'closedate', operator: 'BETWEEN', value: startTimestamp, highValue: endTimestamp });
       }
+      params.filterGroups = JSON.stringify([{ filters }]);
 
       let allDeals = [];
       let hasMore = true;
