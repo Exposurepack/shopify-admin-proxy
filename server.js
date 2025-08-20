@@ -762,7 +762,9 @@ class HubSpotClient {
           tax: tax,
           discount: parseFloat(invoice.properties.hs_discount_amount) || 0,
           total: total,
-          currency: invoice.properties.hs_currency || 'AUD'
+          currency: invoice.properties.hs_currency || 'AUD',
+          // Include full properties so downstream address extraction can work
+          properties: invoice.properties
         }
       };
 
@@ -1683,7 +1685,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       // Common HubSpot invoice address field patterns
       const addressFields = {
         billing: {
-          address1: props.billing_address || props.billing_street || props.bill_to_address1 || '',
+          address1: props.billing_address || props.billing_street || props.bill_to_address || props.bill_to_address1 || '',
           city: props.billing_city || props.bill_to_city || '',
           province: props.billing_state || props.billing_province || props.bill_to_state || '',
           country: props.billing_country || props.bill_to_country || 'Australia',
@@ -1691,11 +1693,11 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
           company: props.billing_company || props.bill_to_company || contactProps.company || ''
         },
         shipping: {
-          address1: props.shipping_address || props.shipping_street || props.ship_to_address1 || props.ship_to_street || '',
+          address1: props.shipping_address || props.shipping_street || props.ship_to_address || props.ship_to_address1 || props.ship_to_street || props.delivery_address || props.delivery_street || '',
           city: props.shipping_city || props.ship_to_city || '',
           province: props.shipping_state || props.shipping_province || props.ship_to_state || '',
-          country: props.shipping_country || props.ship_to_country || 'Australia',
-          zip: props.shipping_zip || props.shipping_postal_code || props.ship_to_zip || '',
+          country: props.shipping_country || props.ship_to_country || props.delivery_country || 'Australia',
+          zip: props.shipping_zip || props.shipping_postal_code || props.ship_to_zip || props.delivery_zip || '',
           company: props.shipping_company || props.ship_to_company || contactProps.company || ''
         }
       };
