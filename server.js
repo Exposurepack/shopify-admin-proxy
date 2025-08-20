@@ -3254,10 +3254,17 @@ app.all("/analytics-data", async (req, res) => {
         // Transform HubSpot deals to Shopify order format for compatibility
         const transformedOrders = hubspotDeals.map(deal => {
           const props = deal.properties;
+          // Convert HubSpot millisecond timestamps to ISO if needed
+          const toISO = (v) => v ? (isNaN(Number(v)) ? v : new Date(Number(v)).toISOString()) : null;
+          const createdISO = toISO(props.closedate || props.createdate || deal.createdAt);
+          const closedISO = toISO(props.closedate);
+
           return {
             id: props.shopify_order_id || deal.id,
             name: props.shopify_order_number || props.dealname,
-            created_at: props.createdate || deal.createdAt,
+            // Use closed date primarily for chart bucketing (matches HubSpot "Close Date")
+            created_at: createdISO,
+            closed_at: closedISO,
             // amount in HubSpot deals is ex-GST in our integration; use it as fallback
             total_price: props.shopify_total_inc_gst || props.amount || '0',
             total_price_ex_gst: props.shopify_total_ex_gst || props.amount || '0',
