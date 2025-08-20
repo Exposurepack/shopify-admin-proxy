@@ -615,7 +615,9 @@ class HubSpotClient {
           headers: this.headers,
           params: {
             properties: [
-              'name', 'domain', 'website', 'phone', 'city', 'state', 'country'
+              'name', 'domain', 'website', 'phone',
+              'address', 'address2', 'street', 'address_line_1', 'address_line_2',
+              'city', 'state', 'country', 'zip', 'postal_code', 'postcode'
             ].join(',')
           },
           timeout: 30000
