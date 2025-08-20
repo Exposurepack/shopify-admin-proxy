@@ -525,6 +525,67 @@ class HubSpotClient {
     };
   }
 
+  async getQuote(quoteId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/quotes/${quoteId}`,
+        {
+          headers: this.headers,
+          params: {
+            properties: [
+              'hs_object_id', 'hs_createdate', 'hs_lastmodifieddate',
+              'hs_quote_number', 'name', 'status',
+              // Common quote address field patterns
+              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_zip',
+              'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_zip',
+              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
+              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
+              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
+              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip',
+              // Alternative common patterns
+              'address', 'address1', 'address2', 'address_line_1', 'address_line_2', 'street', 'city', 'state', 'zip', 'postal_code', 'postcode',
+              // System-prefixed variants
+              'hs_ship_to_address', 'hs_ship_to_address_2', 'hs_ship_to_city', 'hs_ship_to_state', 'hs_ship_to_zip', 'hs_ship_to_country',
+              'hs_bill_to_address', 'hs_bill_to_address_2', 'hs_bill_to_city', 'hs_bill_to_state', 'hs_bill_to_zip', 'hs_bill_to_country',
+              'hs_shipping_address', 'hs_shipping_address_2', 'hs_shipping_city', 'hs_shipping_state', 'hs_shipping_zip', 'hs_shipping_country',
+              'hs_billing_address', 'hs_billing_address_2', 'hs_billing_city', 'hs_billing_state', 'hs_billing_zip', 'hs_billing_country'
+            ].join(',')
+          },
+          timeout: 30000
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch quote ${quoteId}:`, error.response?.data?.message || error.message);
+      return null;
+    }
+  }
+
+  async getAssociatedQuotes(dealId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/quotes`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+
+      if (!response.data.results || response.data.results.length === 0) {
+        return [];
+      }
+
+      const quotePromises = response.data.results.map(association => 
+        this.getQuote(association.id)
+      );
+
+      return (await Promise.all(quotePromises)).filter(Boolean);
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch associated quotes for deal ${dealId}:`, error.response?.data?.message || error.message);
+      return [];
+    }
+  }
+
   // Helper to fetch deal pipelines and resolve Closed Won stage
   async resolveClosedWonStage(preferredPipelineName = 'deals pipeline') {
     // Env override if provided
@@ -565,7 +626,12 @@ class HubSpotClient {
               // Try common custom field naming patterns
               'address_line_1', 'address_line_2', 'street_address', 'delivery_street',
               'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
-              'billing_street', 'billing_city', 'billing_state', 'billing_zip'
+              'billing_street', 'billing_city', 'billing_state', 'billing_zip',
+              // Include HubSpot system-prefixed variants
+              'hs_ship_to_address', 'hs_ship_to_address_2', 'hs_ship_to_city', 'hs_ship_to_state', 'hs_ship_to_zip', 'hs_ship_to_country',
+              'hs_bill_to_address', 'hs_bill_to_address_2', 'hs_bill_to_city', 'hs_bill_to_state', 'hs_bill_to_zip', 'hs_bill_to_country',
+              'hs_shipping_address', 'hs_shipping_address_2', 'hs_shipping_city', 'hs_shipping_state', 'hs_shipping_zip', 'hs_shipping_country',
+              'hs_billing_address', 'hs_billing_address_2', 'hs_billing_city', 'hs_billing_state', 'hs_billing_zip', 'hs_billing_country'
             ].join(','),
             associations: 'contacts,line_items'
           },
@@ -595,7 +661,9 @@ class HubSpotClient {
               'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
               'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
               // Alternative common patterns
-              'address_line_1', 'address_line_2', 'postal_code', 'postcode'
+              'address_line_1', 'address_line_2', 'postal_code', 'postcode',
+              // System-prefixed variants (rare on contacts, but safe to include)
+              'hs_address', 'hs_city', 'hs_state', 'hs_zip', 'hs_country'
             ].join(',')
           },
           timeout: 30000
@@ -670,9 +738,14 @@ class HubSpotClient {
               'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
               'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
               'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
-              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip'
+              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip',
+              // System-prefixed variants
+              'hs_ship_to_address', 'hs_ship_to_address_2', 'hs_ship_to_city', 'hs_ship_to_state', 'hs_ship_to_zip', 'hs_ship_to_country',
+              'hs_bill_to_address', 'hs_bill_to_address_2', 'hs_bill_to_city', 'hs_bill_to_state', 'hs_bill_to_zip', 'hs_bill_to_country',
+              'hs_shipping_address', 'hs_shipping_address_2', 'hs_shipping_city', 'hs_shipping_state', 'hs_shipping_zip', 'hs_shipping_country',
+              'hs_billing_address', 'hs_billing_address_2', 'hs_billing_city', 'hs_billing_state', 'hs_billing_zip', 'hs_billing_country'
             ].join(','),
-            associations: 'line_items'
+            associations: 'line_items,quotes,companies,contacts'
           }
         }
       );
@@ -759,6 +832,7 @@ class HubSpotClient {
       return {
         lineItems: lineItems,
         invoice: {
+          id: invoiceId,
           number: invoice.properties.hs_invoice_number || `INV-${invoiceId}`,
           subtotal: subtotal,
           tax: tax,
@@ -766,7 +840,8 @@ class HubSpotClient {
           total: total,
           currency: invoice.properties.hs_currency || 'AUD',
           // Include full properties so downstream address extraction can work
-          properties: invoice.properties
+          properties: invoice.properties,
+          associations: invoice.associations || {}
         }
       };
 
@@ -868,6 +943,31 @@ class HubSpotClient {
       return await Promise.all(companyPromises);
     } catch (error) {
       console.warn(`⚠️ Failed to fetch associated companies for deal ${dealId}:`, error.response?.data?.message || error.message);
+      return [];
+    }
+  }
+
+  async getCompaniesForContact(contactId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/contacts/${contactId}/associations/companies`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+
+      if (!response.data.results || response.data.results.length === 0) {
+        return [];
+      }
+
+      const companyPromises = response.data.results.map(association => 
+        this.getCompany(association.id)
+      );
+
+      return await Promise.all(companyPromises);
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch companies for contact ${contactId}:`, error.response?.data?.message || error.message);
       return [];
     }
   }
@@ -1727,8 +1827,67 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Try to get specific addresses from all sources, with fallbacks
     const dealShippingAddress = getDealAddress('shipping');
     const dealBillingAddress = getDealAddress('billing');
-    const invoiceShippingAddress = getInvoiceAddress('shipping');
-    const invoiceBillingAddress = getInvoiceAddress('billing');
+    let invoiceShippingAddress = getInvoiceAddress('shipping');
+    let invoiceBillingAddress = getInvoiceAddress('billing');
+
+    // If invoice addresses are missing, try associated quote(s)
+    if ((!invoiceShippingAddress || !invoiceBillingAddress) && invoiceInfo) {
+      try {
+        // Prefer direct associations from invoice if present
+        let quoteIds = [];
+        if (invoiceInfo.associations && invoiceInfo.associations.quotes && Array.isArray(invoiceInfo.associations.quotes.results)) {
+          quoteIds = invoiceInfo.associations.quotes.results.map(r => r.id).filter(Boolean);
+        }
+        // If not present on invoice, pull quotes associated with the deal
+        if (quoteIds.length === 0) {
+          const quotes = await hubspotClient.getAssociatedQuotes(dealId);
+          quoteIds = quotes.map(q => q.id);
+        }
+
+        if (quoteIds.length > 0) {
+          const quote = await hubspotClient.getQuote(quoteIds[0]);
+          if (quote && quote.properties) {
+            const qp = quote.properties;
+            const mapQuoteAddr = (type) => {
+              const qAddr = type === 'shipping' ? {
+                address1: qp.shipping_address || qp.shipping_street || qp.ship_to_address || qp.ship_to_street || qp.address || qp.address_line_1 || qp.address1 || '',
+                city: qp.shipping_city || qp.ship_to_city || qp.city || '',
+                province: qp.shipping_state || qp.shipping_province || qp.ship_to_state || qp.state || '',
+                country: qp.shipping_country || qp.ship_to_country || qp.country || 'Australia',
+                zip: qp.shipping_zip || qp.shipping_postal_code || qp.ship_to_zip || qp.postal_code || qp.postcode || qp.zip || '',
+                company: qp.shipping_company || qp.ship_to_company || contactProps.company || ''
+              } : {
+                address1: qp.billing_address || qp.billing_street || qp.bill_to_address || qp.bill_to_street || qp.address || qp.address_line_1 || qp.address1 || '',
+                city: qp.billing_city || qp.bill_to_city || qp.city || '',
+                province: qp.billing_state || qp.billing_province || qp.bill_to_state || qp.state || '',
+                country: qp.billing_country || qp.bill_to_country || qp.country || 'Australia',
+                zip: qp.billing_zip || qp.billing_postal_code || qp.bill_to_zip || qp.postal_code || qp.postcode || qp.zip || '',
+                company: qp.billing_company || qp.bill_to_company || contactProps.company || ''
+              };
+              if (qAddr.address1 || qAddr.city) {
+                return {
+                  first_name: firstName,
+                  last_name: lastName,
+                  company: qAddr.company,
+                  address1: qAddr.address1,
+                  city: qAddr.city,
+                  province: qAddr.province,
+                  country: qAddr.country,
+                  zip: qAddr.zip,
+                  phone: formattedPhone
+                };
+              }
+              return null;
+            };
+
+            if (!invoiceShippingAddress) invoiceShippingAddress = mapQuoteAddr('shipping');
+            if (!invoiceBillingAddress) invoiceBillingAddress = mapQuoteAddr('billing');
+          }
+        }
+      } catch (quoteErr) {
+        console.log(`ℹ️ Quote-based address extraction not available:`, quoteErr.message);
+      }
+    }
     const contactAddress = getContactAddress();
     // Company address (associated company) fallback
     let companyAddress = null;
@@ -1769,7 +1928,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`   🏢 Company address:`, companyAddress);
     
     // Build final addresses with proper fallback logic
-    // Priority: Deal address → Invoice address → Company address → Contact address → Manual entry
+    // Priority: Deal address → Invoice/Quote address → Company address → Contact address → Manual entry
     // IMPORTANT: If shipping isn't available, fall back to billing address
     let shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
                          invoiceBillingAddress || companyAddress || contactAddress;
@@ -3336,6 +3495,19 @@ app.all("/analytics-data", async (req, res) => {
     if (startDate && endDate) {
       dateRange = { startDate, endDate };
       console.log(`📅 Date range filter: ${startDate} to ${endDate}`);
+    } else {
+      // Default to the last N months (6) if no explicit range provided
+      const monthsParam = parseInt(req.query.months || '6');
+      if (!Number.isNaN(monthsParam) && monthsParam > 0) {
+        const end = new Date();
+        const start = new Date();
+        start.setMonth(start.getMonth() - monthsParam);
+        dateRange = {
+          startDate: start.toISOString().slice(0, 10),
+          endDate: end.toISOString().slice(0, 10)
+        };
+        console.log(`📅 Default HubSpot window (months=${monthsParam}): ${dateRange.startDate} → ${dateRange.endDate}`);
+      }
     }
     
     let analyticsData = {
@@ -3350,40 +3522,44 @@ app.all("/analytics-data", async (req, res) => {
       try {
         console.log("🎯 Attempting to fetch HubSpot deals data...");
         
-        const hubspotDeals = await hubspotClient.getDealsForAnalytics(dateRange);
+        const hubspotDealsRaw = await hubspotClient.getDealsForAnalytics(dateRange);
 
-        // Attempt to enrich each deal with its primary associated contact (for proper customer/company grouping)
+        // Performance controls (defaults: months=6 handled above, max=250 deals, enrich=off)
+        const maxDeals = Math.max(1, parseInt(req.query.max || '250'));
+        const enrichParam = String(req.query.enrich || '0').toLowerCase();
+        const enrich = enrichParam === '1' || enrichParam === 'true';
+        const hubspotDeals = (hubspotDealsRaw || []).slice(0, maxDeals);
+
+        // Optional enrichment only when explicitly enabled
         const contactsByDealId = {};
         const companiesByDealId = {};
-        for (const d of hubspotDeals) {
-          try {
-            const contacts = await hubspotClient.getAssociatedContacts(d.id);
-            if (Array.isArray(contacts) && contacts.length > 0) {
-              contactsByDealId[d.id] = contacts[0];
-            }
-          } catch (e) {
-            // Non-fatal; leave without contact enrichment
-          }
-          try {
-            const companies = await hubspotClient.getAssociatedCompanies(d.id);
-            if (Array.isArray(companies) && companies.length > 0) {
-              companiesByDealId[d.id] = companies[0];
-            }
-          } catch (e) {
-            // Non-fatal
+        if (enrich) {
+          for (const d of hubspotDeals) {
+            try {
+              const contacts = await hubspotClient.getAssociatedContacts(d.id);
+              if (Array.isArray(contacts) && contacts.length > 0) {
+                contactsByDealId[d.id] = contacts[0];
+              }
+            } catch (e) {}
+            try {
+              const companies = await hubspotClient.getAssociatedCompanies(d.id);
+              if (Array.isArray(companies) && companies.length > 0) {
+                companiesByDealId[d.id] = companies[0];
+              }
+            } catch (e) {}
           }
         }
 
-        // Transform HubSpot deals to Shopify order format for compatibility (now with contact enrichment where possible)
+        // Transform HubSpot deals to Shopify order format for compatibility (lite by default)
         const transformedOrders = hubspotDeals.map(deal => {
           const props = deal.properties;
           // Convert HubSpot millisecond timestamps to ISO if needed
           const toISO = (v) => v ? (isNaN(Number(v)) ? v : new Date(Number(v)).toISOString()) : null;
           const createdISO = toISO(props.closedate || props.createdate || deal.createdAt);
           const closedISO = toISO(props.closedate);
-
-          const contact = contactsByDealId[deal.id];
-          const company = companiesByDealId[deal.id];
+          
+          const contact = enrich ? contactsByDealId[deal.id] : null;
+          const company = enrich ? companiesByDealId[deal.id] : null;
           const cprops = contact?.properties || {};
           const contactEmail = cprops.email || null;
           const contactFirst = cprops.firstname || '';
@@ -3410,17 +3586,16 @@ app.all("/analytics-data", async (req, res) => {
             currency: props.hs_deal_currency_code || 'AUD',
             financial_status: 'paid', // All HubSpot deals are closed won
             fulfillment_status: 'fulfilled',
-            customer: {
+            customer: enrich ? {
               email: contactEmail || `hubspot-deal-${deal.id}@exposurepack.com.au`,
               first_name: contactFirst,
               last_name: contactLast,
               name: contactFullName || undefined,
               company: contactCompany || undefined,
               default_address: contactCompany ? { company: contactCompany } : undefined
-            },
-            // Helpful display fields to align with storefront customer grouping logic
-            display_business_name: contactCompany || undefined,
-            display_customer_name: contactFullName || undefined,
+            } : { email: `hubspot-deal-${deal.id}@exposurepack.com.au` },
+            // Include display fields only when enriched
+            ...(enrich ? { display_business_name: contactCompany || undefined, display_customer_name: contactFullName || undefined } : {}),
             line_items: [], // Could be enhanced later with associated line items
             tags: ['hubspot-import'],
             
@@ -3620,6 +3795,33 @@ app.post("/shopify-webhook", async (req, res) => {
     console.log(`💰 Order total: ${order.total_price} ${order.currency || 'AUD'}`);
     console.log(`👤 Customer: ${order.customer?.email || 'N/A'}`);
     console.log(`📦 Line items: ${order.line_items?.length || 0}`);
+
+    // Guard: Skip creating HubSpot deal for orders that originated from HubSpot
+    const tagsValue = Array.isArray(order.tags) ? order.tags.join(',') : (order.tags || '');
+    const tagsLower = String(tagsValue).toLowerCase();
+    const hasHubspotTag = tagsLower.includes('hubspot');
+    const hasHubspotImportTag = tagsLower.includes('hubspot-import');
+    const hasHubspotNoteAttr = Array.isArray(order.note_attributes) && order.note_attributes.some(na => {
+      const name = (na.name || '').toLowerCase();
+      const value = (na.value || '').toLowerCase();
+      return name === 'hubspot_deal_id' || value.includes('hubspot') || value === 'hubspot_webhook';
+    });
+
+    if (hasHubspotTag || hasHubspotImportTag || hasHubspotNoteAttr) {
+      console.log('🛑 Skipping HubSpot deal creation for order with HubSpot indicators:', {
+        tags: tagsValue,
+        hasHubspotTag,
+        hasHubspotImportTag,
+        hasHubspotNoteAttr
+      });
+      return res.status(200).json({
+        received: true,
+        processed: false,
+        message: 'Skipped HubSpot deal creation for order imported from HubSpot',
+        orderId: order.id,
+        orderNumber: order.name
+      });
+    }
 
     // Create HubSpot deal from Shopify order
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
