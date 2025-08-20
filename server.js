@@ -1730,6 +1730,35 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     const invoiceShippingAddress = getInvoiceAddress('shipping');
     const invoiceBillingAddress = getInvoiceAddress('billing');
     const contactAddress = getContactAddress();
+    // Company address (associated company) fallback
+    let companyAddress = null;
+    try {
+      const companies = await hubspotClient.getAssociatedCompanies(dealId);
+      if (Array.isArray(companies) && companies.length > 0) {
+        const cp = companies[0].properties || companies[0];
+        const address1 = cp.address || cp.address_line_1 || cp.street || cp.address1 || '';
+        const city = cp.city || '';
+        const province = cp.state || cp.province || '';
+        const zip = cp.zip || cp.postal_code || cp.postcode || '';
+        const country = cp.country || 'Australia';
+        const company = cp.name || contactProps.company || '';
+        if (address1 || city) {
+          companyAddress = {
+            first_name: firstName,
+            last_name: lastName,
+            company,
+            address1,
+            city,
+            province,
+            country,
+            zip,
+            phone: formattedPhone
+          };
+        }
+      }
+    } catch (e) {
+      console.log(`ℹ️ Company address fallback not available:`, e.message);
+    }
     
     console.log(`🏠 Address extraction results:`);
     console.log(`   🏢 Deal shipping:`, dealShippingAddress);
@@ -1737,13 +1766,14 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`   📦 Invoice shipping:`, invoiceShippingAddress);
     console.log(`   💰 Invoice billing:`, invoiceBillingAddress);
     console.log(`   👤 Contact address:`, contactAddress);
+    console.log(`   🏢 Company address:`, companyAddress);
     
     // Build final addresses with proper fallback logic
-    // Priority: Deal address → Invoice address → Contact address → Manual entry
+    // Priority: Deal address → Invoice address → Company address → Contact address → Manual entry
     // IMPORTANT: If shipping isn't available, fall back to billing address
     let shippingAddress = dealShippingAddress || invoiceShippingAddress || dealBillingAddress || 
-                         invoiceBillingAddress || contactAddress;
-    let billingAddress = dealBillingAddress || invoiceBillingAddress || contactAddress;
+                         invoiceBillingAddress || companyAddress || contactAddress;
+    let billingAddress = dealBillingAddress || invoiceBillingAddress || companyAddress || contactAddress;
     
     // If we still don't have addresses, ensure both billing and shipping use the same contact address
     if (!shippingAddress && !billingAddress && contactAddress) {
