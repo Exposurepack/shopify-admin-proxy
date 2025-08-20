@@ -16,6 +16,8 @@ const {
   SHOPIFY_API_VERSION = "2024-10",
   FRONTEND_SECRET,
   HUBSPOT_PRIVATE_APP_TOKEN,
+  HUBSPOT_PIPELINE_ID,
+  HUBSPOT_CLOSED_WON_STAGE,
   PORT = 10000,
   NODE_ENV = "development"
 } = process.env;
@@ -521,6 +523,27 @@ class HubSpotClient {
       "Authorization": `Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}`,
       "Content-Type": "application/json"
     };
+  }
+
+  // Helper to fetch deal pipelines and resolve Closed Won stage
+  async resolveClosedWonStage(preferredPipelineName = 'deals pipeline') {
+    // Env override if provided
+    if (HUBSPOT_PIPELINE_ID && HUBSPOT_CLOSED_WON_STAGE) {
+      return { pipelineId: HUBSPOT_PIPELINE_ID, stageId: HUBSPOT_CLOSED_WON_STAGE };
+    }
+    const res = await axios.get(`${this.baseURL}/crm/v3/pipelines/deals`, { headers: this.headers });
+    const pipelines = res.data?.results || [];
+
+    const pipeline = pipelines.find(p => (p.label || '').toLowerCase() === preferredPipelineName.toLowerCase())
+      || pipelines.find(p => p.displayOrder === 0)
+      || pipelines[0];
+
+    const stages = pipeline?.stages || [];
+    const closedWon = stages.find(s => (s.label || '').toLowerCase().includes('closed won'))
+      || stages.find(s => (s.id || '').toLowerCase() === 'closedwon')
+      || stages[stages.length - 1];
+
+    return { pipelineId: pipeline?.id || 'default', stageId: closedWon?.id || 'closedwon' };
   }
 
   async getDeal(dealId) {
@@ -1242,34 +1265,16 @@ async function createHubSpotDealFromShopifyOrder(order) {
     console.log(`   Shipping Total: $${totalShippingCost.toFixed(2)} ${currency}`);
     console.log(`   Subtotal: $${subtotalAmount.toFixed(2)} ${currency}`);
 
-    // Prepare deal data
+    // Resolve pipeline/stage and prepare minimal, valid properties for HubSpot
+    const { pipelineId, stageId } = await hubspotClient.resolveClosedWonStage('deals pipeline');
+
     const dealData = {
       dealname: `Shopify Order ${order.name}`,
-      amount: exGstAmount, // Send ex-GST amount as the main deal amount
-      dealstage: 'closedwon', // Set to closed won as requested
-      pipeline: 'default', // You may need to adjust this based on your HubSpot setup
-      closedate: new Date().toISOString().split('T')[0], // Today's date
-      hubspot_owner_id: '', // You can set a default owner if needed
-      
-      // Enhanced financial data
-      shopify_total_inc_gst: grossAmount,
-      shopify_total_ex_gst: exGstAmount,
-      shopify_gst_amount: calculatedGstAmount,
-      shopify_subtotal: subtotalAmount,
-      shopify_tax_amount: taxAmount,
-      shopify_shipping_cost: totalShippingCost,
-      shopify_shipping_method: order.shipping_lines?.[0]?.title || 'Standard',
-      
-      // Custom properties for Shopify data
-      shopify_order_id: order.id,
-      shopify_order_number: order.name,
-      shopify_order_status: order.financial_status,
-      shopify_fulfillment_status: order.fulfillment_status || 'unfulfilled',
-      
-      // Additional info
-      hs_deal_currency_code: currency,
-      deal_source: 'Shopify Website',
-      deal_description: `Order imported from Shopify\nOrder #: ${order.name}\nProduct Items: ${productLineItems.length}\nShipping Items: ${shippingLineItems.length}\nCustomer: ${customer.email || 'N/A'}\n\nFinancials:\nTotal (inc GST): $${grossAmount.toFixed(2)}\nTotal (ex GST): $${exGstAmount.toFixed(2)}\nGST: $${calculatedGstAmount.toFixed(2)}\nShipping: $${totalShippingCost.toFixed(2)}${productLineItems.length > 0 ? `\n\nProduct Items:\n${productLineItems.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}${shippingLineItems.length > 0 ? `\n\nShipping Items (processed as shipping cost):\n${shippingLineItems.map((item, i) => `${i + 1}. ${item.title} (Qty: ${item.quantity}, $${parseFloat(item.price).toFixed(2)})`).join('\n')}` : ''}`
+      amount: exGstAmount,
+      pipeline: pipelineId,
+      dealstage: stageId,
+      closedate: Date.now(),
+      deal_currency_code: currency
     };
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
@@ -1289,6 +1294,20 @@ async function createHubSpotDealFromShopifyOrder(order) {
 
     // Create deal in HubSpot
     const deal = await hubspotClient.createDeal(dealData);
+
+    // Ensure stage/pipeline are correct in case HubSpot ignored on create
+    if (deal?.properties?.dealstage !== stageId || deal?.properties?.pipeline !== pipelineId) {
+      try {
+        await axios.patch(
+          `${hubspotClient.baseURL}/crm/v3/objects/deals/${deal.id}`,
+          { properties: { pipeline: pipelineId, dealstage: stageId, closedate: Date.now() } },
+          { headers: hubspotClient.headers }
+        );
+        console.log(`✅ Normalized deal ${deal.id} to pipeline=${pipelineId}, stage=${stageId}`);
+      } catch (patchErr) {
+        console.warn(`⚠️ Failed to normalize deal stage/pipeline for ${deal.id}:`, patchErr.message);
+      }
+    }
     console.log(`✅ Created HubSpot deal: ${deal.id} - ${dealData.dealname}`);
 
     // Associate contact with deal if both exist
