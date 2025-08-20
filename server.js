@@ -584,6 +584,26 @@ class HubSpotClient {
     }
   }
 
+  async getCompany(companyId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/companies/${companyId}`,
+        {
+          headers: this.headers,
+          params: {
+            properties: [
+              'name', 'domain', 'website', 'phone', 'city', 'state', 'country'
+            ].join(',')
+          },
+          timeout: 30000
+        }
+      );
+      return response.data;
+    } catch (error) {
+      throw new Error(`Failed to fetch HubSpot company ${companyId}: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
   async getDealInvoices(dealId) {
     try {
       console.log(`🔍 Fetching invoices for deal ${dealId}...`);
@@ -796,6 +816,31 @@ class HubSpotClient {
       return await Promise.all(contactPromises);
     } catch (error) {
       console.warn(`⚠️ Failed to fetch associated contacts for deal ${dealId}:`, error.response?.data?.message || error.message);
+      return [];
+    }
+  }
+
+  async getAssociatedCompanies(dealId) {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/companies`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+
+      if (!response.data.results || response.data.results.length === 0) {
+        return [];
+      }
+
+      const companyPromises = response.data.results.map(association => 
+        this.getCompany(association.id)
+      );
+
+      return await Promise.all(companyPromises);
+    } catch (error) {
+      console.warn(`⚠️ Failed to fetch associated companies for deal ${dealId}:`, error.response?.data?.message || error.message);
       return [];
     }
   }
@@ -3245,14 +3290,45 @@ app.all("/analytics-data", async (req, res) => {
         console.log("🎯 Attempting to fetch HubSpot deals data...");
         
         const hubspotDeals = await hubspotClient.getDealsForAnalytics(dateRange);
-        
-        // Transform HubSpot deals to Shopify order format for compatibility
+
+        // Attempt to enrich each deal with its primary associated contact (for proper customer/company grouping)
+        const contactsByDealId = {};
+        const companiesByDealId = {};
+        for (const d of hubspotDeals) {
+          try {
+            const contacts = await hubspotClient.getAssociatedContacts(d.id);
+            if (Array.isArray(contacts) && contacts.length > 0) {
+              contactsByDealId[d.id] = contacts[0];
+            }
+          } catch (e) {
+            // Non-fatal; leave without contact enrichment
+          }
+          try {
+            const companies = await hubspotClient.getAssociatedCompanies(d.id);
+            if (Array.isArray(companies) && companies.length > 0) {
+              companiesByDealId[d.id] = companies[0];
+            }
+          } catch (e) {
+            // Non-fatal
+          }
+        }
+
+        // Transform HubSpot deals to Shopify order format for compatibility (now with contact enrichment where possible)
         const transformedOrders = hubspotDeals.map(deal => {
           const props = deal.properties;
           // Convert HubSpot millisecond timestamps to ISO if needed
           const toISO = (v) => v ? (isNaN(Number(v)) ? v : new Date(Number(v)).toISOString()) : null;
           const createdISO = toISO(props.closedate || props.createdate || deal.createdAt);
           const closedISO = toISO(props.closedate);
+
+          const contact = contactsByDealId[deal.id];
+          const company = companiesByDealId[deal.id];
+          const cprops = contact?.properties || {};
+          const contactEmail = cprops.email || null;
+          const contactFirst = cprops.firstname || '';
+          const contactLast = cprops.lastname || '';
+          const contactFullName = `${contactFirst} ${contactLast}`.trim() || null;
+          const contactCompany = cprops.company || company?.properties?.name || null;
 
           return {
             id: props.shopify_order_id || deal.id,
@@ -3274,8 +3350,16 @@ app.all("/analytics-data", async (req, res) => {
             financial_status: 'paid', // All HubSpot deals are closed won
             fulfillment_status: 'fulfilled',
             customer: {
-              email: `hubspot-deal-${deal.id}@exposurepack.com.au`
+              email: contactEmail || `hubspot-deal-${deal.id}@exposurepack.com.au`,
+              first_name: contactFirst,
+              last_name: contactLast,
+              name: contactFullName || undefined,
+              company: contactCompany || undefined,
+              default_address: contactCompany ? { company: contactCompany } : undefined
             },
+            // Helpful display fields to align with storefront customer grouping logic
+            display_business_name: contactCompany || undefined,
+            display_customer_name: contactFullName || undefined,
             line_items: [], // Could be enhanced later with associated line items
             tags: ['hubspot-import'],
             
