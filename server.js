@@ -1268,8 +1268,15 @@ async function createHubSpotDealFromShopifyOrder(order) {
     // Resolve pipeline/stage and prepare minimal, valid properties for HubSpot
     const { pipelineId, stageId } = await hubspotClient.resolveClosedWonStage('deals pipeline');
 
+    // Build desired deal name: "Business name - Customer first name"
+    const businessName = (billingAddress.company || shippingAddress.company || customer?.default_address?.company || '').trim();
+    const customerFirstName = (customer.first_name || shippingAddress.first_name || billingAddress.first_name || '').trim();
+    const computedDealName = businessName
+      ? `${businessName} - ${customerFirstName || 'Customer'}`
+      : (customerFirstName || 'Customer');
+
     const dealData = {
-      dealname: `Shopify Order ${order.name}`,
+      dealname: computedDealName,
       amount: exGstAmount,
       pipeline: pipelineId,
       dealstage: stageId,
@@ -2459,7 +2466,7 @@ app.post("/fulfillments", authenticate, async (req, res) => {
  */
 app.post("/fulfillments/v2", authenticate, async (req, res) => {
   console.log("🚚 ===============================================");
-  console.log("🚚 Creating fulfillment via Shopify REST API");
+  console.log("🚚 Creating fulfillment via Shopify REST API (Fulfillment Orders API)");
 
   try {
     const { orderId, trackingCompany, trackingNumber, notifyCustomer = true } = req.body;
@@ -2478,65 +2485,66 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     const numericOrderId = orderId.toString().replace(/^gid:\/\/shopify\/Order\//, '');
     console.log(`🔢 Numeric Order ID: ${numericOrderId}`);
 
-    // Get the first available location
-    console.log(`🏪 Getting store locations to set location_id...`);
-    const locationsResponse = await restClient.get('/locations.json');
-    const locations = locationsResponse.locations || [];
-    
-    if (locations.length === 0) {
-      throw new Error('No locations found in store');
-    }
-
-    const locationId = locations[0].id;
-    console.log(`📍 Using location_id: ${locationId} (${locations[0].name || 'Default'})`);
-
     // Pre-check: Verify order exists and is fulfillable
     console.log(`🔍 Fetching order details for pre-check...`);
     try {
       const orderCheckResponse = await restClient.get(`/orders/${numericOrderId}.json`);
       const orderDetails = orderCheckResponse.order;
-      
       console.log(`📋 Order Status Check:`);
       console.log(`   💰 Financial Status: ${orderDetails.financial_status}`);
       console.log(`   📦 Fulfillment Status: ${orderDetails.fulfillment_status || 'unfulfilled'}`);
-      console.log(`   🏷️ Tags: ${orderDetails.tags || 'none'}`);
-      console.log(`   📅 Created: ${orderDetails.created_at}`);
-      console.log(`   📝 Line Items: ${orderDetails.line_items?.length || 0}`);
-
       if (orderDetails.financial_status?.toLowerCase() !== 'paid') {
         throw new Error(`Order must be paid before fulfillment. Current status: ${orderDetails.financial_status}`);
       }
-
       if (orderDetails.fulfillment_status?.toLowerCase() === 'fulfilled') {
         throw new Error(`Order is already fully fulfilled.`);
       }
-
-      console.log(`✅ Order appears fulfillable, proceeding with fulfillment creation...`);
-      
     } catch (orderFetchError) {
       console.error(`⚠️ Could not fetch order details for pre-check:`, orderFetchError.message);
-      console.log(`🔄 Proceeding with fulfillment anyway...`);
     }
 
-    // Create fulfillment payload
+    // Use Fulfillment Orders API (required on latest versions)
+    console.log(`📦 Fetching fulfillment orders for order ${numericOrderId}...`);
+    const foRes = await restClient.get(`/orders/${numericOrderId}/fulfillment_orders.json`);
+    const fulfillmentOrders = foRes.fulfillment_orders || [];
+    if (fulfillmentOrders.length === 0) {
+      throw new Error('No fulfillment orders found for this order');
+    }
+
+    // Build line_items_by_fulfillment_order for all remaining quantities
+    const lineItemsByFO = fulfillmentOrders.map(fo => {
+      const items = (fo.line_items || []).map(li => ({
+        id: li.id,
+        quantity: li.remaining_quantity ?? li.fulfillable_quantity ?? li.quantity
+      })).filter(li => (li.quantity || 0) > 0);
+      return {
+        fulfillment_order_id: fo.id,
+        fulfillment_order_line_items: items
+      };
+    }).filter(group => group.fulfillment_order_line_items.length > 0);
+
+    if (lineItemsByFO.length === 0) {
+      return res.status(400).json({ success: false, error: 'Nothing to fulfill (no remaining quantities)' });
+    }
+
     const fulfillmentPayload = {
       fulfillment: {
-        location_id: locationId,
-        tracking_number: trackingNumber,
-        tracking_company: trackingCompany,
-        notify_customer: notifyCustomer
+        notify_customer: notifyCustomer,
+        tracking_info: {
+          number: trackingNumber,
+          company: trackingCompany
+        },
+        line_items_by_fulfillment_order: lineItemsByFO
       }
     };
 
     console.log(`🔍 Making Shopify REST API call:`);
-    console.log(`📍 URL: /orders/${numericOrderId}/fulfillments.json`);
-    console.log(`🔐 Using API version: ${SHOPIFY_API_VERSION}`);
-    console.log(`🏪 Store: ${SHOPIFY_STORE_URL}`);
+    console.log(`📍 URL: /fulfillments.json`);
     console.log(`📋 Final fulfillment data:`, JSON.stringify(fulfillmentPayload, null, 2));
 
-    // Create fulfillment using Shopify REST API
+    // Create fulfillment using Shopify REST API (FO API)
     const fulfillmentResponse = await restClient.post(
-      `/orders/${numericOrderId}/fulfillments.json`,
+      `/fulfillments.json`,
       fulfillmentPayload
     );
 
@@ -2545,7 +2553,7 @@ app.post("/fulfillments/v2", authenticate, async (req, res) => {
     res.json({
       success: true,
       fulfillment: fulfillmentResponse,
-      message: "Fulfillment created successfully via REST API",
+      message: "Fulfillment created successfully via Fulfillment Orders API",
       trackingNumber: trackingNumber,
       trackingCompany: trackingCompany
     });
