@@ -1814,20 +1814,22 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       // Common HubSpot invoice address field patterns
       const addressFields = {
         billing: {
-          address1: props.billing_address || props.billing_street || props.billing_address_line_1 || props.bill_to_address || props.bill_to_address1 || '',
-          city: props.billing_city || props.bill_to_city || props.billing_town || '',
-          province: props.billing_state || props.billing_province || props.bill_to_state || props.billing_region || '',
-          country: props.billing_country || props.bill_to_country || props.billing_country_code || 'Australia',
-          zip: props.billing_zip || props.billing_postal_code || props.billing_postcode || props.bill_to_zip || '',
-          company: props.billing_company || props.bill_to_company || contactProps.company || ''
+          // Prefer recipient company (bill-to) fields when present
+          address1: props.hs_recipient_company_address || props.billing_address || props.billing_street || props.billing_address_line_1 || props.bill_to_address || props.bill_to_address1 || props.hs_sender_company_address || '',
+          city: props.hs_recipient_company_city || props.billing_city || props.bill_to_city || props.billing_town || '',
+          province: props.hs_recipient_company_state || props.billing_state || props.billing_province || props.bill_to_state || props.billing_region || '',
+          country: props.hs_recipient_shipping_country || props.billing_country || props.bill_to_country || props.billing_country_code || 'Australia',
+          zip: props.hs_recipient_company_zip || props.billing_zip || props.billing_postal_code || props.billing_postcode || props.bill_to_zip || '',
+          company: props.hs_recipient_shipping_name || props.billing_company || props.bill_to_company || contactProps.company || ''
         },
         shipping: {
-          address1: props.shipping_address || props.shipping_street || props.shipping_address_line_1 || props.ship_to_address || props.ship_to_address1 || props.ship_to_street || props.delivery_address || props.delivery_street || '',
-          city: props.shipping_city || props.ship_to_city || props.shipping_town || '',
-          province: props.shipping_state || props.shipping_province || props.ship_to_state || props.shipping_region || '',
-          country: props.shipping_country || props.ship_to_country || props.delivery_country || props.shipping_country_code || 'Australia',
-          zip: props.shipping_zip || props.shipping_postal_code || props.shipping_postcode || props.ship_to_zip || props.delivery_zip || '',
-          company: props.shipping_company || props.ship_to_company || contactProps.company || ''
+          // Prefer recipient shipping fields when present
+          address1: props.hs_recipient_shipping_address || props.shipping_address || props.shipping_street || props.shipping_address_line_1 || props.ship_to_address || props.ship_to_address1 || props.ship_to_street || props.delivery_address || props.delivery_street || '',
+          city: props.hs_recipient_shipping_city || props.shipping_city || props.ship_to_city || props.shipping_town || '',
+          province: props.hs_recipient_shipping_state || props.shipping_state || props.shipping_province || props.ship_to_state || props.shipping_region || '',
+          country: props.hs_recipient_shipping_country || props.shipping_country || props.ship_to_country || props.delivery_country || props.shipping_country_code || 'Australia',
+          zip: props.hs_recipient_shipping_zip || props.shipping_zip || props.shipping_postal_code || props.shipping_postcode || props.ship_to_zip || props.delivery_zip || '',
+          company: props.hs_recipient_shipping_name || props.shipping_company || props.ship_to_company || contactProps.company || ''
         }
       };
       
@@ -2107,6 +2109,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       if (address === dealBillingAddress) return isShipping ? 'Deal Billing (fallback)' : 'Deal Billing';  
       if (address === invoiceShippingAddress) return 'Invoice Shipping';
       if (address === invoiceBillingAddress) return isShipping ? 'Invoice Billing (fallback)' : 'Invoice Billing';
+      if (address === companyAddress) return 'Company';
       if (address === contactAddress) return 'Contact';
       if (knownAddress && knownAddress.billing && knownAddress.shipping) {
         return isShipping ? 'Manual Shipping Override' : 'Manual Billing Override';
