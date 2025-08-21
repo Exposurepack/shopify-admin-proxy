@@ -752,7 +752,34 @@ class HubSpotClient {
       
       console.log(`📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
 
-      const invoice = invoiceResponse.data;
+      let invoice = invoiceResponse.data;
+
+      // Dynamic property discovery: if no address-like keys returned, refetch with all relevant props
+      const hasAddressLikeKey = (propsObj) => Object.keys(propsObj || {}).some(k =>
+        /address|address1|address_1|street|city|state|province|region|zip|postcode|postal|ship|bill|delivery/i.test(k)
+      );
+
+      if (!hasAddressLikeKey(invoice.properties)) {
+        try {
+          console.log(`🔎 No address-like keys on invoice. Discovering invoice properties...`);
+          const propsDef = await axios.get(`${this.baseURL}/crm/v3/properties/invoices`, { headers: this.headers });
+          const allNames = (propsDef.data?.results || []).map(p => p.name);
+          const wanted = allNames.filter(n => /address|address1|address_1|street|city|state|province|region|zip|postcode|postal|ship|bill|delivery|hs_tax_amount|hs_total_amount|hs_subtotal_amount|hs_discount_amount|hs_invoice_number|hs_currency/i.test(n));
+          if (wanted.length > 0) {
+            const refetch = await axios.get(
+              `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
+              {
+                headers: this.headers,
+                params: { properties: wanted.join(','), associations: 'line_items,quotes,companies,contacts' }
+              }
+            );
+            invoice = refetch.data;
+            console.log(`🔁 Refetched invoice with ${wanted.length} properties (dynamic)`);
+          }
+        } catch (discErr) {
+          console.log(`ℹ️ Invoice property discovery failed:`, discErr.message);
+        }
+      }
       
       // Get invoice line items
       const lineItemsResponse = await axios.get(
@@ -1787,19 +1814,19 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       // Common HubSpot invoice address field patterns
       const addressFields = {
         billing: {
-          address1: props.billing_address || props.billing_street || props.bill_to_address || props.bill_to_address1 || '',
-          city: props.billing_city || props.bill_to_city || '',
-          province: props.billing_state || props.billing_province || props.bill_to_state || '',
-          country: props.billing_country || props.bill_to_country || 'Australia',
-          zip: props.billing_zip || props.billing_postal_code || props.bill_to_zip || '',
+          address1: props.billing_address || props.billing_street || props.billing_address_line_1 || props.bill_to_address || props.bill_to_address1 || '',
+          city: props.billing_city || props.bill_to_city || props.billing_town || '',
+          province: props.billing_state || props.billing_province || props.bill_to_state || props.billing_region || '',
+          country: props.billing_country || props.bill_to_country || props.billing_country_code || 'Australia',
+          zip: props.billing_zip || props.billing_postal_code || props.billing_postcode || props.bill_to_zip || '',
           company: props.billing_company || props.bill_to_company || contactProps.company || ''
         },
         shipping: {
-          address1: props.shipping_address || props.shipping_street || props.ship_to_address || props.ship_to_address1 || props.ship_to_street || props.delivery_address || props.delivery_street || '',
-          city: props.shipping_city || props.ship_to_city || '',
-          province: props.shipping_state || props.shipping_province || props.ship_to_state || '',
-          country: props.shipping_country || props.ship_to_country || props.delivery_country || 'Australia',
-          zip: props.shipping_zip || props.shipping_postal_code || props.ship_to_zip || props.delivery_zip || '',
+          address1: props.shipping_address || props.shipping_street || props.shipping_address_line_1 || props.ship_to_address || props.ship_to_address1 || props.ship_to_street || props.delivery_address || props.delivery_street || '',
+          city: props.shipping_city || props.ship_to_city || props.shipping_town || '',
+          province: props.shipping_state || props.shipping_province || props.ship_to_state || props.shipping_region || '',
+          country: props.shipping_country || props.ship_to_country || props.delivery_country || props.shipping_country_code || 'Australia',
+          zip: props.shipping_zip || props.shipping_postal_code || props.shipping_postcode || props.ship_to_zip || props.delivery_zip || '',
           company: props.shipping_company || props.ship_to_company || contactProps.company || ''
         }
       };
@@ -3743,6 +3770,49 @@ app.all("/analytics-data", async (req, res) => {
       error: error.message,
       processing_time_ms: processingTime
     });
+  }
+});
+
+/**
+ * GA4 connectivity status endpoint
+ * Checks env configuration and attempts a tiny report via GA4 Data API when library is available
+ */
+app.get("/ads/ga4-status", async (req, res) => {
+  try {
+    const propertyId = process.env.GA4_PROPERTY_ID || null;
+    const serviceJson = process.env.GA_SERVICE_ACCOUNT_JSON || null;
+
+    const configured = !!propertyId && !!serviceJson;
+    let canQuery = false;
+    const details = {};
+
+    if (configured) {
+      try {
+        // Lazy import so the server still runs even if the package isn't installed yet
+        const mod = await import('@google-analytics/data').catch(() => null);
+        if (!mod || (!mod.BetaAnalyticsDataClient && !mod.v1Beta)) {
+          details.error = "@google-analytics/data not installed. Run: npm i @google-analytics/data";
+        } else {
+          const BetaClient = mod.BetaAnalyticsDataClient || mod.v1Beta.BetaAnalyticsDataClient;
+          const creds = JSON.parse(serviceJson);
+          const client = new BetaClient({ credentials: creds });
+          const [report] = await client.runReport({
+            property: `properties/${propertyId}`,
+            dateRanges: [{ startDate: 'yesterday', endDate: 'today' }],
+            metrics: [{ name: 'screenPageViews' }],
+            limit: 1
+          });
+          canQuery = true;
+          details.sampleRows = report?.rows?.length || 0;
+        }
+      } catch (e) {
+        details.error = e.message;
+      }
+    }
+
+    return res.json({ ok: true, configured, propertyId, canQuery, details });
+  } catch (err) {
+    return res.status(200).json({ ok: false, error: err.message });
   }
 });
 
