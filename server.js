@@ -6,6 +6,9 @@ import multer from "multer";
 import FormData from "form-data";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
+import session from "express-session";
+import passport from "passport";
+import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 
 dotenv.config();
 
@@ -19,7 +22,13 @@ const {
   HUBSPOT_PIPELINE_ID,
   HUBSPOT_CLOSED_WON_STAGE,
   PORT = 10000,
-  NODE_ENV = "development"
+  NODE_ENV = "development",
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
+  GOOGLE_CALLBACK_URL,
+  SESSION_SECRET,
+  GA4_PROPERTY_ID,
+  GA4_DEFAULT_PROPERTY_ID
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
@@ -32,6 +41,13 @@ if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
 
 if (!HUBSPOT_PRIVATE_APP_TOKEN) {
   console.warn("⚠️ HUBSPOT_PRIVATE_APP_TOKEN not set - HubSpot webhook functionality will be disabled");
+}
+
+if (!SESSION_SECRET) {
+  console.warn("⚠️ SESSION_SECRET not set. Using a fallback is insecure; set SESSION_SECRET in env.");
+}
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_CALLBACK_URL) {
+  console.warn("⚠️ Google OAuth envs not fully set (GOOGLE_CLIENT_ID/SECRET/CALLBACK_URL). OAuth endpoints will fail until configured.");
 }
 
 // Security and performance configuration
@@ -121,6 +137,48 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
+// Session (required for OAuth with cookies; cross-site needs SameSite=None)
+app.use(session({
+  secret: SESSION_SECRET || 'change-me',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: NODE_ENV === 'production' ? 'none' : 'lax',
+    secure: NODE_ENV === 'production',
+    maxAge: 30 * 24 * 60 * 60 * 1000
+  }
+}));
+
+// Passport (Google)
+passport.serializeUser((user, done) => {
+  done(null, { id: user?.id || user?.profile?.id || user?.emails?.[0]?.value || 'google' });
+});
+passport.deserializeUser((obj, done) => done(null, obj));
+
+passport.use(new GoogleStrategy(
+  {
+    clientID: GOOGLE_CLIENT_ID || "",
+    clientSecret: GOOGLE_CLIENT_SECRET || "",
+    callbackURL: GOOGLE_CALLBACK_URL || "",
+  },
+  (accessToken, refreshToken, profile, done) => {
+    const user = {
+      id: profile?.id,
+      profile,
+      tokens: {
+        accessToken,
+        refreshToken: refreshToken || null,
+        expiryDate: Date.now() + 3500 * 1000
+      }
+    };
+    return done(null, user);
+  }
+));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
 // File upload configuration
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -148,8 +206,16 @@ const upload = multer({
 
 // Authentication middleware
 const authenticate = (req, res, next) => {
-  // Bypass authentication for webhook endpoints and test endpoints
-  if (req.path === '/webhook' || req.path === '/shopify-webhook' || req.path === '/fulfillments/test' || req.path === '/fulfillments/v2/test' || (req.path === '/fulfillments' && req.method === 'GET') || (req.path === '/fulfillments/v2' && req.method === 'GET')) {
+  // Bypass authentication for webhook endpoints, test endpoints, and Google OAuth paths
+  if (
+    req.path === '/webhook' ||
+    req.path === '/shopify-webhook' ||
+    req.path === '/fulfillments/test' ||
+    req.path === '/fulfillments/v2/test' ||
+    (req.path === '/fulfillments' && req.method === 'GET') ||
+    (req.path === '/fulfillments/v2' && req.method === 'GET') ||
+    req.path.startsWith('/auth/google')
+  ) {
     return next();
   }
   
@@ -3819,6 +3885,122 @@ app.get("/ads/ga4-status", async (req, res) => {
   }
 });
 
+// ===== Google OAuth routes and GA4 helper middleware =====
+const ensureGoogle = async (req, res, next) => {
+  try {
+    const ses = req.session || {};
+    const g = ses.google || {};
+    if (!g.accessToken) {
+      return res.status(401).json({ error: "Google not connected. Visit /auth/google first." });
+    }
+    // Refresh if expiring/expired
+    if (!g.expiryDate || Date.now() >= g.expiryDate - 60000) {
+      if (!g.refreshToken || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+        return res.status(401).json({ error: "Google access token expired and cannot be refreshed" });
+      }
+      const params = new URLSearchParams({
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        refresh_token: g.refreshToken,
+        grant_type: 'refresh_token'
+      });
+      const resp = await axios.post('https://oauth2.googleapis.com/token', params.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const data = resp.data || {};
+      req.session.google.accessToken = data.access_token;
+      req.session.google.expiryDate = Date.now() + ((data.expires_in || 3600) * 1000);
+    }
+    req.googleAccessToken = req.session.google.accessToken;
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: "Failed to ensure Google token", details: e.message });
+  }
+};
+
+// Start Google OAuth (request offline access for refresh_token)
+app.get('/auth/google',
+  (req, res, next) => {
+    const scope = [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/analytics.readonly",
+      "openid",
+      "profile"
+    ];
+    // Optionally carry a `state` param to redirect back to your dashboard
+    passport.authenticate('google', {
+      scope,
+      accessType: 'offline',
+      prompt: 'consent',
+      state: req.query.state || ''
+    })(req, res, next);
+  }
+);
+
+// OAuth callback: persist tokens in session, redirect to admin dashboard
+app.get('/auth/google/callback', (req, res, next) => {
+  passport.authenticate('google', { failureRedirect: '/auth/google/failure' }, (err, user) => {
+    if (err || !user) return res.redirect('/auth/google/failure');
+    req.login(user, (loginErr) => {
+      if (loginErr) return res.redirect('/auth/google/failure');
+      // Persist tokens in session for API usage
+      req.session.google = {
+        accessToken: user.tokens?.accessToken || null,
+        refreshToken: user.tokens?.refreshToken || null,
+        expiryDate: user.tokens?.expiryDate || null,
+        profile: user.profile || null
+      };
+      const redirectUrl = req.query.state ? decodeURIComponent(req.query.state) : '/';
+      return res.redirect(redirectUrl);
+    });
+  })(req, res, next);
+});
+
+app.get('/auth/google/failure', (req, res) => {
+  res.status(401).json({ error: "Google authentication failed" });
+});
+
+app.post('/auth/google/logout', (req, res) => {
+  try {
+    if (req.logout) req.logout(() => {});
+    if (req.session) req.session.google = null;
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: true });
+  }
+});
+
+// GA4 Summary: last 7 days activeUsers + sessions
+app.get('/api/ga4/summary', ensureGoogle, async (req, res) => {
+  try {
+    const propertyId = req.query.propertyId || GA4_PROPERTY_ID || GA4_DEFAULT_PROPERTY_ID;
+    if (!propertyId) {
+      return res.status(400).json({ error: "GA4 property ID required. Supply ?propertyId=... or set GA4_PROPERTY_ID/GA4_DEFAULT_PROPERTY_ID." });
+    }
+    const url = `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`;
+    const body = {
+      dateRanges: [{ startDate: "7daysAgo", endDate: "today" }],
+      metrics: [{ name: "activeUsers" }, { name: "sessions" }]
+    };
+    const { data } = await axios.post(url, body, {
+      headers: {
+        Authorization: `Bearer ${req.googleAccessToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    res.json({
+      ok: true,
+      propertyId,
+      summary: data
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: "Failed to fetch GA4 summary",
+      details: error.response?.data || error.message
+    });
+  }
+});
 /**
  * Shopify webhook endpoint for order creation
  * Creates a deal in HubSpot when a new order is placed
