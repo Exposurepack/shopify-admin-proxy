@@ -26,6 +26,7 @@ const {
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
   GOOGLE_CALLBACK_URL,
+  GOOGLE_REDIRECT_URI,
   SESSION_SECRET,
   GA4_PROPERTY_ID,
   GA4_DEFAULT_PROPERTY_ID
@@ -160,7 +161,7 @@ passport.use(new GoogleStrategy(
   {
     clientID: GOOGLE_CLIENT_ID || "",
     clientSecret: GOOGLE_CLIENT_SECRET || "",
-    callbackURL: GOOGLE_CALLBACK_URL || "",
+    callbackURL: GOOGLE_CALLBACK_URL || GOOGLE_REDIRECT_URI || "",
   },
   (accessToken, refreshToken, profile, done) => {
     const user = {
