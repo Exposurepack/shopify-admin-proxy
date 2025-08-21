@@ -4002,6 +4002,45 @@ app.get('/api/ga4/summary', ensureGoogle, async (req, res) => {
     });
   }
 });
+
+// GA4: list accessible properties for the current OAuth user
+app.get('/api/ga4/properties', ensureGoogle, async (req, res) => {
+  try {
+    // Use Admin API Account Summaries to list properties
+    // https://analyticsadmin.googleapis.com/v1beta/accountSummaries
+    const results = [];
+    let nextPageToken = undefined;
+    for (let i = 0; i < 5; i++) { // safety cap
+      const url = new URL('https://analyticsadmin.googleapis.com/v1beta/accountSummaries');
+      if (nextPageToken) url.searchParams.set('pageToken', nextPageToken);
+      url.searchParams.set('pageSize', '200');
+      const { data } = await axios.get(url.toString(), {
+        headers: { Authorization: `Bearer ${req.googleAccessToken}` }
+      });
+      const summaries = Array.isArray(data?.accountSummaries) ? data.accountSummaries : [];
+      for (const acc of summaries) {
+        const accountName = acc.displayName || acc.name || '';
+        const props = Array.isArray(acc.propertySummaries) ? acc.propertySummaries : [];
+        for (const p of props) {
+          const propertyResource = p.property || '';
+          const id = propertyResource.replace('properties/', '');
+          results.push({
+            propertyId: id,
+            propertyResource,
+            propertyDisplayName: p.displayName || id,
+            accountDisplayName: accountName,
+            account: acc.name || ''
+          });
+        }
+      }
+      nextPageToken = data?.nextPageToken;
+      if (!nextPageToken) break;
+    }
+    res.json({ ok: true, count: results.length, properties: results });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.response?.data || error.message });
+  }
+});
 /**
  * Shopify webhook endpoint for order creation
  * Creates a deal in HubSpot when a new order is placed
