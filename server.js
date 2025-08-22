@@ -4059,7 +4059,8 @@ app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
     if (!developerToken) return res.status(400).json({ ok: false, error: 'ADS_DEVELOPER_TOKEN not configured' });
     if (!customerId) return res.status(400).json({ ok: false, error: 'Google Ads customerId required (customerId=1234567890)' });
 
-    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`;
+    // REST path for SearchStream
+    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}:searchStream`;
     const query = `
       SELECT
         metrics.clicks,
