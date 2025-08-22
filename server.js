@@ -4054,8 +4054,10 @@ app.get('/api/ga4/properties', ensureGoogle, async (req, res) => {
 app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
   try {
     const developerToken = ADS_DEVELOPER_TOKEN;
-    const loginCustomerId = req.query.loginCustomerId || ADS_LOGIN_CUSTOMER_ID || undefined;
-    const customerId = (req.query.customerId || ADS_DEFAULT_CUSTOMER_ID || '').replace(/-/g, '');
+    const rawLoginId = req.query.loginCustomerId || ADS_LOGIN_CUSTOMER_ID || '';
+    const loginCustomerId = rawLoginId ? String(rawLoginId).trim().replace(/\D/g, '') : undefined;
+    const rawCustomerId = (req.query.customerId || ADS_DEFAULT_CUSTOMER_ID || '');
+    const customerId = String(rawCustomerId).trim().replace(/\D/g, '');
     if (!developerToken) return res.status(400).json({ ok: false, error: 'ADS_DEVELOPER_TOKEN not configured' });
     if (!customerId) return res.status(400).json({ ok: false, error: 'Google Ads customerId required (customerId=1234567890)' });
 
