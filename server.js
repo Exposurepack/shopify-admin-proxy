@@ -2758,6 +2758,233 @@ app.post("/fulfillments", authenticate, async (req, res) => {
 });
 
 /**
+ * Virtual Suborders (supplier splits) and Merge Groups endpoints
+ */
+
+// Get virtual suborders for an order (stored in metafield custom.virtual_suborders)
+app.get("/orders/:id/suborders", authenticate, async (req, res) => {
+  try {
+    const legacyId = req.params.id.replace(/\D/g, '');
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+    const existing = await metafieldManager.findMetafield(orderGID, "custom", "virtual_suborders");
+    if (!existing?.value) {
+      return res.json({ groups: [], status: "Paid" });
+    }
+    let payload = { groups: [], status: "Paid" };
+    try {
+      payload = JSON.parse(existing.value);
+    } catch (e) {
+      // ignore JSON parse error, return default
+    }
+    res.json(payload);
+  } catch (error) {
+    handleError(error, res, "Failed to fetch virtual suborders");
+  }
+});
+
+// Save/overwrite virtual suborders
+app.post("/orders/:id/suborders", authenticate, async (req, res) => {
+  try {
+    const legacyId = req.params.id.replace(/\D/g, '');
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+    const body = req.body || {};
+    if (!Array.isArray(body.groups)) {
+      return res.status(400).json({ success: false, error: "groups array required" });
+    }
+    await metafieldManager.setMetafield(orderGID, "custom", "virtual_suborders", JSON.stringify(body), "json");
+    res.json({ success: true });
+  } catch (error) {
+    handleError(error, res, "Failed to save virtual suborders");
+  }
+});
+
+// Force-merge all suborders into a single group (override auto split)
+app.post("/orders/:id/suborders/merge-all", authenticate, async (req, res) => {
+  try {
+    const legacyId = req.params.id.replace(/\D/g, '');
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+    const label = (req.body && req.body.label) || "Merged";
+    // Fetch REST order to get line items with IDs
+    const rest = await restClient.get(`/orders/${legacyId}.json`);
+    const rOrder = rest.order || rest;
+    const items = (rOrder.line_items || []).map(li => ({
+      line_item_id: li.id,
+      title: li.title,
+      sku: li.sku,
+      quantity: li.quantity
+    }));
+    const merged = { groups: [{ id: `merged-${legacyId}`, supplierName: label, stage: 'Paid', lineItems: items }], status: 'Paid' };
+    await metafieldManager.setMetafield(orderGID, "custom", "virtual_suborders", JSON.stringify(merged), "json");
+    res.json({ success: true, merged });
+  } catch (error) {
+    handleError(error, res, "Failed to force-merge suborders");
+  }
+});
+
+// Create partial fulfillment for selected items of an order (notify customer by default)
+// Body: { items: [{ line_item_id, quantity }], trackingCompany?, trackingNumber?, notifyCustomer?=true, groupId? }
+app.post("/orders/:id/fulfillments/partial", authenticate, async (req, res) => {
+  try {
+    const legacyId = req.params.id.replace(/\D/g, '');
+    const { items, trackingCompany, trackingNumber, notifyCustomer = true, groupId } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, error: "items array (line_item_id, quantity) required" });
+    }
+
+    // Use Fulfillment Orders API to map order line_item_id -> fulfillment_order_line_item.id
+    const foRes = await restClient.get(`/orders/${legacyId}/fulfillment_orders.json`);
+    const fulfillmentOrders = foRes.fulfillment_orders || [];
+    if (fulfillmentOrders.length === 0) {
+      return res.status(400).json({ success: false, error: "No fulfillment orders found for this order" });
+    }
+
+    // Desired quantities by order line_item_id
+    const wantQtyByOrderLineId = new Map();
+    for (const it of items) {
+      const lid = Number(String(it.line_item_id || '').replace(/\D/g, ''));
+      const qty = Math.max(0, Number(it.quantity || 0));
+      if (lid && qty > 0) {
+        wantQtyByOrderLineId.set(lid, (wantQtyByOrderLineId.get(lid) || 0) + qty);
+      }
+    }
+    if (wantQtyByOrderLineId.size === 0) {
+      return res.status(400).json({ success: false, error: "No valid line_item_id quantities provided" });
+    }
+
+    const lineItemsByFO = [];
+    for (const fo of fulfillmentOrders) {
+      const foItems = [];
+      for (const li of (fo.line_items || [])) {
+        const orderLineId = Number(li.line_item_id || li.shopify_line_item_id || 0);
+        if (!orderLineId) continue;
+        const want = wantQtyByOrderLineId.get(orderLineId) || 0;
+        if (want <= 0) continue;
+        const remaining = Number(li.remaining_quantity ?? li.fulfillable_quantity ?? li.quantity ?? 0);
+        const take = Math.min(remaining, want);
+        if (take > 0) {
+          foItems.push({ id: li.id, quantity: take });
+          wantQtyByOrderLineId.set(orderLineId, want - take);
+        }
+      }
+      if (foItems.length > 0) {
+        lineItemsByFO.push({
+          fulfillment_order_id: fo.id,
+          fulfillment_order_line_items: foItems
+        });
+      }
+    }
+
+    if (lineItemsByFO.length === 0) {
+      return res.status(400).json({ success: false, error: "Nothing matched or remaining to fulfill for selected items" });
+    }
+
+    const payload = {
+      fulfillment: {
+        notify_customer: !!notifyCustomer,
+        tracking_info: {
+          number: trackingNumber || undefined,
+          company: trackingCompany || undefined
+        },
+        line_items_by_fulfillment_order: lineItemsByFO
+      }
+    };
+
+    const fulfillmentResponse = await restClient.post(`/fulfillments.json`, payload);
+
+    // Update virtual suborders group to Dispatched if provided
+    if (groupId) {
+      try {
+        const orderGID = `gid://shopify/Order/${legacyId}`;
+        const existing = await metafieldManager.findMetafield(orderGID, "custom", "virtual_suborders");
+        if (existing?.value) {
+          const parsed = JSON.parse(existing.value);
+          const groups = Array.isArray(parsed.groups) ? parsed.groups : [];
+          const idx = groups.findIndex(g => String(g.id) === String(groupId));
+          if (idx >= 0) {
+            groups[idx].stage = "Dispatched";
+            groups[idx].tracking = {
+              number: trackingNumber || '',
+              company: trackingCompany || '',
+              dispatched_at: new Date().toISOString()
+            };
+            await metafieldManager.setMetafield(orderGID, "custom", "virtual_suborders", JSON.stringify({ ...parsed, groups }), "json");
+          }
+        }
+      } catch (e) {
+        console.warn("Could not update virtual_suborders after partial fulfillment:", e.message);
+      }
+    }
+
+    res.json({ success: true, fulfillment: fulfillmentResponse, message: "Partial fulfillment created" });
+  } catch (error) {
+    handleError(error, res, "Failed to create partial fulfillment");
+  }
+});
+
+// Merge group: fetch
+app.get("/orders/:id/merge-group", authenticate, async (req, res) => {
+  try {
+    const legacyId = req.params.id.replace(/\D/g, '');
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+    const mf = await metafieldManager.findMetafield(orderGID, "custom", "merge_group");
+    if (!mf?.value) return res.json(null);
+    let payload = null; try { payload = JSON.parse(mf.value); } catch {}
+    res.json(payload);
+  } catch (error) { handleError(error, res, "Failed to fetch merge group"); }
+});
+
+// Merge group: create on a set of orders
+// Body: { orderIds: [legacyIds], title? }
+app.post("/orders/merge", authenticate, async (req, res) => {
+  try {
+    const { orderIds = [], title } = req.body || {};
+    const ids = (orderIds || []).map(id => String(id).replace(/\D/g, '')).filter(Boolean);
+    if (ids.length < 2) return res.status(400).json({ success: false, error: "At least two orderIds required" });
+    const groupId = `mg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+    const primaryLegacyId = ids.slice().sort()[0];
+    const payload = { id: groupId, title: title || 'Merged Orders', primary_legacy_id: primaryLegacyId, order_ids: ids, created_at: new Date().toISOString() };
+    await Promise.all(ids.map(async legacyId => {
+      const orderGID = `gid://shopify/Order/${legacyId}`;
+      await metafieldManager.setMetafield(orderGID, "custom", "merge_group", JSON.stringify(payload), "json");
+    }));
+    res.json({ success: true, group: payload });
+  } catch (error) { handleError(error, res, "Failed to create merge group"); }
+});
+
+// Merge group: update membership (replace)
+// Body: { groupId, orderIds: [legacyIds], title? }
+app.post("/orders/merge/update", authenticate, async (req, res) => {
+  try {
+    const { groupId, orderIds = [], title } = req.body || {};
+    const ids = (orderIds || []).map(id => String(id).replace(/\D/g, '')).filter(Boolean);
+    if (!groupId || ids.length < 1) return res.status(400).json({ success: false, error: "groupId and orderIds required" });
+    const primaryLegacyId = ids.slice().sort()[0];
+    const payload = { id: groupId, title: title || 'Merged Orders', primary_legacy_id: primaryLegacyId, order_ids: ids, updated_at: new Date().toISOString() };
+    await Promise.all(ids.map(async legacyId => {
+      const orderGID = `gid://shopify/Order/${legacyId}`;
+      await metafieldManager.setMetafield(orderGID, "custom", "merge_group", JSON.stringify(payload), "json");
+    }));
+    res.json({ success: true, group: payload });
+  } catch (error) { handleError(error, res, "Failed to update merge group"); }
+});
+
+// Merge group: clear from provided orders
+// Body: { orderIds: [legacyIds] }
+app.post("/orders/merge/clear", authenticate, async (req, res) => {
+  try {
+    const { orderIds = [] } = req.body || {};
+    const ids = (orderIds || []).map(id => String(id).replace(/\D/g, '')).filter(Boolean);
+    if (ids.length === 0) return res.status(400).json({ success: false, error: "orderIds required" });
+    await Promise.all(ids.map(async legacyId => {
+      const orderGID = `gid://shopify/Order/${legacyId}`;
+      await metafieldManager.setMetafield(orderGID, "custom", "merge_group", "", "json");
+    }));
+    res.json({ success: true });
+  } catch (error) { handleError(error, res, "Failed to clear merge group"); }
+});
+
+/**
  * Fulfillment endpoint using Shopify REST API
  * Uses REST API to avoid GraphQL permission issues on Grow plan
  */
@@ -3351,32 +3578,46 @@ app.get("/orders/:id", async (req, res) => {
       metafields[mf.node.key] = mf.node.value; 
     });
 
-    const lineItems = node.lineItems.edges.map((item) => ({
-      title: item.node.title,
-      quantity: item.node.quantity,
-      sku: item.node.sku,
-      variantTitle: item.node.variantTitle,
-      vendor: item.node.vendor,
-      productTitle: item.node.product?.title,
-      productType: item.node.product?.productType,
-      productHandle: item.node.product?.handle,
-      unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
-      line_price: item.node.discountedTotalSet?.shopMoney?.amount || item.node.originalTotalSet?.shopMoney?.amount,
-      original_unit_price: item.node.originalUnitPriceSet?.shopMoney?.amount,
-      original_line_price: item.node.originalTotalSet?.shopMoney?.amount,
-    }));
-
-    // Fetch note_attributes via REST for compatibility
+    // Fetch REST order for line_item IDs and note_attributes
     let noteAttributes = {};
+    let restOrder = null;
     try {
-      const restOrder = await restClient.get(`/orders/${legacyId}.json`);
-      restOrder.order.note_attributes.forEach((na) => {
+      const restResp = await restClient.get(`/orders/${legacyId}.json`);
+      restOrder = restResp.order || restResp;
+      (restOrder.note_attributes || []).forEach((na) => {
         noteAttributes[na.name] = na.value;
       });
-      console.log(`✅ Fetched note_attributes for order ${legacyId}:`, Object.keys(noteAttributes));
+      console.log(`✅ Fetched REST order for ${legacyId}: note_attributes + line_items`);
     } catch (restError) {
-      console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
+      console.warn("⚠️ Could not fetch REST order:", restError.message);
     }
+
+    const restLineItems = Array.isArray(restOrder?.line_items) ? restOrder.line_items : [];
+
+    // Merge GraphQL line items with REST IDs to support partial fulfillment mapping
+    const lineItems = node.lineItems.edges.map((edge, idx) => {
+      const g = edge.node;
+      let restMatch = restLineItems.find(ri =>
+        ri.title === g.title && String(ri.sku || '') === String(g.sku || '') && Number(ri.quantity) === Number(g.quantity)
+      ) || restLineItems[idx];
+      return {
+        id: restMatch?.id,
+        title: g.title,
+        quantity: g.quantity,
+        sku: g.sku,
+        variantTitle: g.variantTitle,
+        vendor: g.vendor,
+        productTitle: g.product?.title,
+        productType: g.product?.productType,
+        productHandle: g.product?.handle,
+        unit_price: g.discountedUnitPriceSet?.shopMoney?.amount || g.originalUnitPriceSet?.shopMoney?.amount,
+        line_price: g.discountedTotalSet?.shopMoney?.amount || g.originalTotalSet?.shopMoney?.amount,
+        original_unit_price: g.originalUnitPriceSet?.shopMoney?.amount,
+        original_line_price: g.originalTotalSet?.shopMoney?.amount,
+        variant_id: restMatch?.variant_id,
+        product_id: restMatch?.product_id
+      };
+    });
 
     // Smart naming logic - prioritize attributes over default names
     const businessName = noteAttributes.business_name || noteAttributes.company_name || node.shippingAddress?.company || node.customer?.displayName || 'Unknown';
