@@ -4302,23 +4302,22 @@ app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
     if (!developerToken) return res.status(400).json({ ok: false, error: 'ADS_DEVELOPER_TOKEN not configured' });
     if (!customerId) return res.status(400).json({ ok: false, error: 'Google Ads customerId required (customerId=1234567890)' });
 
-    // REST path for SearchStream
-    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`;
+    // REST path for SearchStream (latest stable)
+    const endpoint = `https://googleads.googleapis.com/v18/customers/${customerId}/googleAds:searchStream`;
+    // Aggregate at the customer level for the last 7 days
     const query = `
-      SELECT
-        metrics.clicks,
-        metrics.impressions,
-        metrics.cost_micros
-      FROM campaign
-      WHERE segments.date BETWEEN '7 DAYS AGO' AND 'TODAY'
+      SELECT metrics.clicks, metrics.impressions, metrics.cost_micros
+      FROM customer
+      DURING LAST_7_DAYS
     `;
     const headers = {
       Authorization: `Bearer ${req.googleAccessToken}`,
       'developer-token': developerToken,
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
       ...(loginCustomerId ? { 'login-customer-id': loginCustomerId } : {})
     };
-    const { data } = await axios.post(endpoint, { query }, { headers });
+    const { data, headers: respHeaders } = await axios.post(endpoint, { query }, { headers });
     // data is a stream of responses; sum metrics
     let clicks = 0, impressions = 0, costMicros = 0;
     const chunks = Array.isArray(data) ? data : [];
@@ -4332,6 +4331,12 @@ app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
     }
     res.json({ ok: true, customerId, loginCustomerId: loginCustomerId || null, metrics: { clicks, impressions, cost_micros: costMicros, cost: costMicros / 1_000_000 } });
   } catch (error) {
+    try {
+      const contentType = error.response?.headers?.['content-type'] || '';
+      if (typeof error.response?.data === 'string' && contentType.includes('text/html')) {
+        return res.status(error.response?.status || 500).json({ ok: false, error: 'Google Ads returned HTML error page', status: error.response?.status, hint: 'Check developer token access and customer/login IDs; ensure OAuth has adwords scope; version=v18' });
+      }
+    } catch {}
     res.status(500).json({ ok: false, error: error.response?.data || error.message });
   }
 });
