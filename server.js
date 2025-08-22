@@ -4062,7 +4062,7 @@ app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
     if (!customerId) return res.status(400).json({ ok: false, error: 'Google Ads customerId required (customerId=1234567890)' });
 
     // REST path for SearchStream
-    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}:searchStream`;
+    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`;
     const query = `
       SELECT
         metrics.clicks,
