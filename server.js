@@ -29,7 +29,10 @@ const {
   GOOGLE_REDIRECT_URI,
   SESSION_SECRET,
   GA4_PROPERTY_ID,
-  GA4_DEFAULT_PROPERTY_ID
+  GA4_DEFAULT_PROPERTY_ID,
+  ADS_DEVELOPER_TOKEN,
+  ADS_LOGIN_CUSTOMER_ID,
+  ADS_DEFAULT_CUSTOMER_ID
 } = process.env;
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
@@ -49,6 +52,9 @@ if (!SESSION_SECRET) {
 }
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_CALLBACK_URL) {
   console.warn("⚠️ Google OAuth envs not fully set (GOOGLE_CLIENT_ID/SECRET/CALLBACK_URL). OAuth endpoints will fail until configured.");
+}
+if (!ADS_DEVELOPER_TOKEN) {
+  console.warn("⚠️ ADS_DEVELOPER_TOKEN not set - Google Ads API routes will return 400 until configured");
 }
 
 // Security and performance configuration
@@ -76,6 +82,7 @@ app.use(limiter);
 // CORS configuration - Allow Shopify and custom domains
 const allowedOrigins = [
   /\.myshopify\.com$/,
+  /\.shopifypreview\.com$/,
   /localhost:\d+$/,
   'https://www.exposurepack.com.au',
   'https://exposurepack.com.au',
@@ -3925,6 +3932,7 @@ app.get('/auth/google',
     const scope = [
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/analytics.readonly",
+      "https://www.googleapis.com/auth/adwords",
       "openid",
       "profile"
     ];
@@ -4037,6 +4045,48 @@ app.get('/api/ga4/properties', ensureGoogle, async (req, res) => {
       if (!nextPageToken) break;
     }
     res.json({ ok: true, count: results.length, properties: results });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.response?.data || error.message });
+  }
+});
+
+// Google Ads: basic summary (last 7 days) - clicks, impressions, cost
+app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
+  try {
+    const developerToken = ADS_DEVELOPER_TOKEN;
+    const loginCustomerId = req.query.loginCustomerId || ADS_LOGIN_CUSTOMER_ID || undefined;
+    const customerId = (req.query.customerId || ADS_DEFAULT_CUSTOMER_ID || '').replace(/-/g, '');
+    if (!developerToken) return res.status(400).json({ ok: false, error: 'ADS_DEVELOPER_TOKEN not configured' });
+    if (!customerId) return res.status(400).json({ ok: false, error: 'Google Ads customerId required (customerId=1234567890)' });
+
+    const endpoint = `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`;
+    const query = `
+      SELECT
+        metrics.clicks,
+        metrics.impressions,
+        metrics.cost_micros
+      FROM campaign
+      WHERE segments.date BETWEEN '7 DAYS AGO' AND 'TODAY'
+    `;
+    const headers = {
+      Authorization: `Bearer ${req.googleAccessToken}`,
+      'developer-token': developerToken,
+      'Content-Type': 'application/json',
+      ...(loginCustomerId ? { 'login-customer-id': loginCustomerId } : {})
+    };
+    const { data } = await axios.post(endpoint, { query }, { headers });
+    // data is a stream of responses; sum metrics
+    let clicks = 0, impressions = 0, costMicros = 0;
+    const chunks = Array.isArray(data) ? data : [];
+    for (const chunk of chunks) {
+      const rows = Array.isArray(chunk.results) ? chunk.results : [];
+      for (const row of rows) {
+        clicks += Number(row.metrics?.clicks || 0);
+        impressions += Number(row.metrics?.impressions || 0);
+        costMicros += Number(row.metrics?.costMicros || row.metrics?.cost_micros || 0);
+      }
+    }
+    res.json({ ok: true, customerId, loginCustomerId: loginCustomerId || null, metrics: { clicks, impressions, cost_micros: costMicros, cost: costMicros / 1_000_000 } });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.response?.data || error.message });
   }
