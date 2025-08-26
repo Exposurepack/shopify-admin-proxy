@@ -3503,6 +3503,74 @@ app.get("/rest/locations", async (req, res) => {
   }
 });
 
+/**
+ * Update order shipping address
+ */
+app.put("/orders/:id/shipping-address", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const legacyId = id.replace(/\D/g, ''); // Extract numeric ID
+    const { shipping_address } = req.body;
+    
+    if (!shipping_address) {
+      return res.status(400).json({ 
+        error: "shipping_address is required",
+        message: "Please provide shipping address data to update"
+      });
+    }
+    
+    console.log(`📮 Updating shipping address for order: ${legacyId}`);
+    console.log(`📮 New address data:`, shipping_address);
+    
+    // Update order via Shopify REST API
+    const updateData = {
+      order: {
+        id: parseInt(legacyId),
+        shipping_address: {
+          first_name: shipping_address.first_name || '',
+          last_name: shipping_address.last_name || '',
+          name: shipping_address.name || `${shipping_address.first_name || ''} ${shipping_address.last_name || ''}`.trim(),
+          company: shipping_address.company || '',
+          address1: shipping_address.address1 || '',
+          address2: shipping_address.address2 || '',
+          city: shipping_address.city || '',
+          province: shipping_address.province || '',
+          province_code: shipping_address.province_code || '',
+          country: shipping_address.country || '',
+          country_code: shipping_address.country_code || '',
+          zip: shipping_address.zip || '',
+          phone: shipping_address.phone || ''
+        }
+      }
+    };
+    
+    // Use REST API to update the order
+    const updatedOrder = await restClient.put(`/orders/${legacyId}.json`, updateData);
+    
+    console.log(`✅ Successfully updated shipping address for order ${legacyId}`);
+    
+    res.json({
+      success: true,
+      message: "Shipping address updated successfully",
+      order: updatedOrder.order,
+      shipping_address: updatedOrder.order.shipping_address
+    });
+    
+  } catch (error) {
+    console.error("❌ Error updating shipping address:", error);
+    console.error("❌ Error details:", error.response?.data || error.message);
+    
+    const statusCode = error.response?.status || 500;
+    const errorMessage = error.response?.data?.errors || error.message || "Failed to update shipping address";
+    
+    res.status(statusCode).json({
+      error: "Failed to update shipping address",
+      message: errorMessage,
+      details: error.response?.data
+    });
+  }
+});
+
 // Fetch a single customer by ID (returns tags among other fields)
 app.get("/rest/customers/:id", async (req, res) => {
   try {
@@ -4263,6 +4331,76 @@ app.post("/shopify-webhook", async (req, res) => {
 });
 
 /**
+ * Shopify webhook endpoint for customer creation/updates
+ * Creates or updates HubSpot contacts with comprehensive customer data
+ */
+app.post("/shopify-customer-webhook", async (req, res) => {
+  const startTime = Date.now();
+  try {
+    const topic = req.headers['x-shopify-topic'];
+    const allowed = ['customers/create', 'customers/update', 'customers/enable', 'customers/disable'];
+    if (!allowed.includes(topic)) {
+      return res.status(200).json({ received: true, processed: false, message: `Ignoring topic ${topic || 'unknown'}` });
+    }
+
+    if (!hubspotClient) {
+      return res.status(200).json({ received: true, processed: false, message: 'HubSpot not configured' });
+    }
+
+    let customer;
+    try {
+      customer = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (e) {
+      return res.status(200).json({ received: true, processed: false, message: 'Invalid JSON payload' });
+    }
+
+    if (!customer || !customer.id || !customer.email) {
+      return res.status(200).json({ received: true, processed: false, message: 'Invalid customer data' });
+    }
+
+    const addr = customer.default_address || {};
+    const tags = Array.isArray(customer.tags) ? customer.tags : (customer.tags ? String(customer.tags).split(',').map(t => t.trim()) : []);
+    const membership = (tags.find(t => ['bronze','silver','gold','trade','wholesale'].includes(String(t).toLowerCase())) || 'retail');
+
+    const contactData = {
+      email: customer.email,
+      firstname: customer.first_name || '',
+      lastname: customer.last_name || '',
+      phone: customer.phone || addr.phone || '',
+      company: addr.company || '',
+      address: addr.address1 || '',
+      city: addr.city || '',
+      state: addr.province || '',
+      country: addr.country || 'Australia',
+      zip: addr.zip || '',
+      shopify_customer_id: String(customer.id),
+      shopify_orders_count: customer.orders_count || 0,
+      shopify_total_spent: (customer.total_spent || '0.00'),
+      shopify_tags: tags.join(', '),
+      membership_level: membership,
+      lifecyclestage: (customer.orders_count > 0 ? 'customer' : 'lead'),
+      shopify_accepts_marketing: !!customer.accepts_marketing
+    };
+
+    const contact = await hubspotClient.createOrUpdateContact(contactData);
+    const processingTime = Date.now() - startTime;
+    return res.status(200).json({
+      received: true,
+      processed: true,
+      message: 'Contact created/updated in HubSpot successfully',
+      hubspotContactId: contact?.id || null,
+      customerId: customer.id,
+      topic,
+      processingTimeMs: processingTime
+    });
+
+  } catch (error) {
+    const processingTime = Date.now() - startTime;
+    return res.status(200).json({ received: true, processed: false, error: error.message, processingTimeMs: processingTime });
+  }
+});
+
+/**
  * HubSpot webhook endpoint for deal stage changes
  * Bypasses authentication for webhook calls
  */
@@ -4388,6 +4526,91 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+/**
+ * HubSpot → Shopify contact sync webhook
+ * Expects HubSpot contact subscription payloads
+ */
+app.post("/hubspot-contact-webhook", async (req, res) => {
+  const startTime = Date.now();
+  try {
+    if (!restClient || !hubspotClient) {
+      return res.status(200).json({ received: true, processed: false, message: 'Shopify/HubSpot not configured' });
+    }
+
+    let payload;
+    try {
+      payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (e) {
+      return res.status(200).json({ received: true, processed: false, message: 'Invalid JSON payload' });
+    }
+
+    const event = Array.isArray(payload) ? payload[0] : payload;
+    const contactId = event?.objectId;
+    const changedProp = event?.propertyName || null;
+    if (!contactId) {
+      return res.status(200).json({ received: true, processed: false, message: 'No contactId in payload' });
+    }
+
+    const contact = await hubspotClient.getContact(contactId);
+    const props = contact?.properties || {};
+    const shopifyCustomerId = props.shopify_customer_id;
+
+    if (!shopifyCustomerId) {
+      return res.status(200).json({ received: true, processed: false, message: 'Contact not linked to Shopify customer', contactId });
+    }
+
+    const customerUpdate = {
+      first_name: props.firstname || '',
+      last_name: props.lastname || '',
+      email: props.email || '',
+      phone: props.phone || '',
+      accepts_marketing: props.shopify_accepts_marketing === 'true' || props.shopify_accepts_marketing === true,
+      note: `Updated from HubSpot Contact ${contactId}${changedProp ? `\nChanged: ${changedProp}` : ''}\nLast HubSpot Sync: ${new Date().toISOString()}`
+    };
+
+    if (props.address || props.city || props.state || props.zip) {
+      customerUpdate.default_address = {
+        first_name: props.firstname || '',
+        last_name: props.lastname || '',
+        company: props.company || '',
+        address1: props.address || '',
+        city: props.city || '',
+        province: props.state || '',
+        country: props.country || 'Australia',
+        zip: props.zip || '',
+        phone: props.phone || ''
+      };
+    }
+
+    // Build tags (merge membership and any provided shopify_tags)
+    const tags = [];
+    if (props.membership_level && props.membership_level !== 'retail') tags.push(props.membership_level);
+    if (props.customer_type === 'wholesale') tags.push('wholesale');
+    if (props.shopify_tags) {
+      String(props.shopify_tags).split(',').map(t => t.trim()).filter(Boolean).forEach(t => {
+        if (!tags.includes(t)) tags.push(t);
+      });
+    }
+    if (tags.length > 0) customerUpdate.tags = tags.join(', ');
+
+    await restClient.put(`/customers/${shopifyCustomerId}.json`, { customer: customerUpdate });
+
+    const processingTime = Date.now() - startTime;
+    return res.status(200).json({
+      received: true,
+      processed: true,
+      message: 'Shopify customer updated from HubSpot contact',
+      contactId,
+      shopifyCustomerId,
+      processingTimeMs: processingTime
+    });
+
+  } catch (error) {
+    const processingTime = Date.now() - startTime;
+    return res.status(200).json({ received: true, processed: false, error: error.message, processingTimeMs: processingTime });
+  }
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
@@ -4448,5 +4671,6 @@ app.listen(PORT, () => {
   console.log("   📤 POST /upload-file       - File uploads");
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
+  console.log("   📮 PUT  /orders/:id/shipping-address - Update order shipping address");
   console.log("✅ ===============================================");
 }); 
