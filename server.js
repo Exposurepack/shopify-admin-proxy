@@ -35,6 +35,8 @@ const {
   ADS_DEFAULT_CUSTOMER_ID
 } = process.env;
 
+const LOG_VERBOSE = process.env.LOG_VERBOSE === 'true';
+
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   console.error("❌ Missing required environment variables:");
   console.error("   - SHOPIFY_STORE_URL");
@@ -93,17 +95,17 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
-    console.log('🌐 CORS check for origin:', origin);
+    if (LOG_VERBOSE) console.log('🌐 CORS check for origin:', origin);
     
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
-      console.log('✅ CORS: No origin header - allowing');
+      if (LOG_VERBOSE) console.log('✅ CORS: No origin header - allowing');
       return callback(null, true);
     }
     
     // In development, allow all origins
     if (NODE_ENV !== "production") {
-      console.log('✅ CORS: Development mode - allowing all origins');
+      if (LOG_VERBOSE) console.log('✅ CORS: Development mode - allowing all origins');
       return callback(null, true);
     }
     
@@ -111,18 +113,18 @@ const corsOptions = {
     const isAllowed = allowedOrigins.some(allowedOrigin => {
       if (typeof allowedOrigin === 'string') {
         const matches = origin === allowedOrigin;
-        console.log(`🔍 CORS: Checking string "${allowedOrigin}" against "${origin}": ${matches}`);
+        if (LOG_VERBOSE) console.log(`🔍 CORS: Checking string "${allowedOrigin}" against "${origin}": ${matches}`);
         return matches;
       } else if (allowedOrigin instanceof RegExp) {
         const matches = allowedOrigin.test(origin);
-        console.log(`🔍 CORS: Checking regex ${allowedOrigin} against "${origin}": ${matches}`);
+        if (LOG_VERBOSE) console.log(`🔍 CORS: Checking regex ${allowedOrigin} against "${origin}": ${matches}`);
         return matches;
       }
       return false;
     });
     
     if (isAllowed) {
-      console.log('✅ CORS: Origin allowed');
+      if (LOG_VERBOSE) console.log('✅ CORS: Origin allowed');
       callback(null, true);
     } else {
       console.log('❌ CORS: Origin not allowed');
@@ -1312,7 +1314,13 @@ class HubSpotClient {
  * Error handling utilities
  */
 const handleError = (error, res, defaultMessage = "An error occurred") => {
-  console.error("🔴 Error:", error);
+  const status = error.response?.status;
+  const statusText = error.response?.statusText;
+  const url = error.config?.url;
+  const requestId = error.response?.headers?.['x-request-id'];
+  const retryAfter = error.response?.headers?.['retry-after'];
+  const details = error.response?.data?.errors || error.message;
+  console.error("🔴 Error:", { message: defaultMessage, status, statusText, url, requestId, retryAfter, details });
 
   if (error instanceof GraphQLError) {
     return res.status(502).json({
@@ -2525,7 +2533,10 @@ app.post("/metafield", (req, res, next) => {
 
 app.post("/metafields", async (req, res) => {
   try {
-    console.log("📝 Incoming /metafields request:", req.body);
+    if (LOG_VERBOSE) {
+      const { orderGID, key, type = "single_line_text_field", namespace = "custom" } = req.body;
+      console.log("📝 Incoming /metafields request:", { orderGID, key, type, namespace });
+    }
 
     const { 
       orderGID, 
@@ -2543,12 +2554,12 @@ app.post("/metafields", async (req, res) => {
 
     // Handle deletion when value is empty
     if (value === "" || value === null || value === undefined) {
-      console.log(`🗑️ Deleting metafield: ${namespace}.${key} for order ${orderGID}`);
+      if (LOG_VERBOSE) console.log(`🗑️ Deleting metafield: ${namespace}.${key} for order ${orderGID}`);
       
       const existingMetafield = await metafieldManager.findMetafield(orderGID, namespace, key);
       
       if (!existingMetafield) {
-        console.log("ℹ️ No metafield found to delete");
+        if (LOG_VERBOSE) console.log("ℹ️ No metafield found to delete");
         return res.json({ 
           success: true, 
           deleted: false, 
@@ -2557,7 +2568,7 @@ app.post("/metafields", async (req, res) => {
       }
 
       const deletedMetafield = await metafieldManager.deleteMetafield(existingMetafield.id);
-      console.log(`✅ Successfully deleted metafield: ${deletedMetafield.id}`);
+      console.log(`✅ Metafield deleted: ${deletedMetafield.id}`);
       
       return res.json({ 
         success: true, 
@@ -2567,10 +2578,10 @@ app.post("/metafields", async (req, res) => {
     }
 
     // Handle creation/update
-    console.log(`💾 Setting metafield: ${namespace}.${key} = ${value}`);
+    if (LOG_VERBOSE) console.log(`💾 Setting metafield: ${namespace}.${key}`);
     const metafield = await metafieldManager.setMetafield(orderGID, namespace, key, value, type);
     
-    console.log(`✅ Successfully set metafield: ${metafield.id}`);
+    console.log(`✅ Metafield set: ${metafield.id}`);
     res.json({ 
       success: true, 
       metafield: {
@@ -3036,7 +3047,7 @@ app.post("/upload-file", upload.single('file'), async (req, res) => {
  */
 app.get("/orders", async (req, res) => {
   try {
-    console.log("📋 Fetching orders with enhanced pagination...");
+    if (LOG_VERBOSE) console.log("📋 Fetching orders with enhanced pagination...");
 
     const { 
       limit = 50, 
@@ -3168,7 +3179,7 @@ app.get("/orders", async (req, res) => {
     if (statusFilter) variables.query = statusFilter.replace('query: "', '').replace('"', '');
 
     if (shouldPaginate) {
-      console.log("🔄 Using pagination to fetch all orders...");
+      if (LOG_VERBOSE) console.log("🔄 Using pagination to fetch all orders...");
       orders = await graphqlClient.queryWithPagination(ordersQuery, variables, pageSize);
     } else {
       const data = await graphqlClient.query(ordersQuery, variables);
@@ -3176,10 +3187,10 @@ app.get("/orders", async (req, res) => {
     }
 
     // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
-    console.log("📋 Fetching note_attributes for all orders...");
+    if (LOG_VERBOSE) console.log("📋 Fetching note_attributes for all orders...");
     let restOrdersMap = {};
     try {
-      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any`);
+      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any&fields=id,note_attributes`);
       restOrdersRes.orders.forEach((order) => {
         const noteAttributes = {};
         order.note_attributes.forEach((na) => {
@@ -3187,9 +3198,9 @@ app.get("/orders", async (req, res) => {
         });
         restOrdersMap[order.id] = noteAttributes;
       });
-      console.log(`✅ Fetched note_attributes for ${Object.keys(restOrdersMap).length} orders`);
+      if (LOG_VERBOSE) console.log(`✅ Fetched note_attributes for ${Object.keys(restOrdersMap).length} orders`);
     } catch (restError) {
-      console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
+      if (LOG_VERBOSE) console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
     }
 
     // Transform the data with smart naming
@@ -3262,7 +3273,7 @@ app.get("/orders", async (req, res) => {
       }
     };
 
-    console.log(`✅ Successfully fetched ${transformedOrders.length} orders`);
+    console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.`);
     res.json(response);
 
   } catch (error) {
@@ -3278,7 +3289,7 @@ app.get("/orders/:id", async (req, res) => {
     const { id } = req.params;
     const legacyId = id.replace(/\D/g, ''); // Extract numeric ID
     
-    console.log(`🔍 Fetching detailed order: ${legacyId}`);
+    if (LOG_VERBOSE) console.log(`🔍 Fetching detailed order: ${legacyId}`);
 
     const orderQuery = `
       query GetOrder($id: ID!) {
@@ -3420,9 +3431,9 @@ app.get("/orders/:id", async (req, res) => {
       restOrder.order.note_attributes.forEach((na) => {
         noteAttributes[na.name] = na.value;
       });
-      console.log(`✅ Fetched note_attributes for order ${legacyId}:`, Object.keys(noteAttributes));
+      if (LOG_VERBOSE) console.log(`✅ Fetched note_attributes for order ${legacyId}:`, Object.keys(noteAttributes));
     } catch (restError) {
-      console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
+      if (LOG_VERBOSE) console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
     }
 
     // Smart naming logic - prioritize attributes over default names
@@ -3459,7 +3470,7 @@ app.get("/orders/:id", async (req, res) => {
       line_items: lineItems,
     };
 
-    console.log(`✅ Successfully fetched order: ${node.name}`);
+    console.log(`🟢 Order loaded: ${node.name} (${legacyId}).`);
     res.json(orderData);
 
   } catch (error) {
@@ -3473,7 +3484,7 @@ app.get("/orders/:id", async (req, res) => {
 app.get("/rest/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    console.log(`🔄 REST fallback: fetching order ${id}`);
+    if (LOG_VERBOSE) console.log(`🔄 REST fallback: fetching order ${id}`);
     
     const orderData = await restClient.get(`/orders/${id}.json`);
     res.json(orderData);
