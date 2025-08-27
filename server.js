@@ -1151,8 +1151,9 @@ class HubSpotClient {
     try {
       console.log(`🔗 Associating contact ${contactId} with deal ${dealId}`);
       
+      // Use association label instead of hard-coded numeric type to avoid portal-specific IDs
       const response = await axios.put(
-        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/contacts/${contactId}/280`,
+        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/contacts/${contactId}/deal_to_contact`,
         {},
         { headers: this.headers }
       );
@@ -1300,7 +1301,7 @@ class HubSpotClient {
       }
       const response = await axios.post(
         `${this.baseURL}/crm/v3/objects/deals/search`,
-        { filterGroups, properties: ['dealname','shopify_order_id','shopify_order_number'].join(','), limit: 100 },
+        { filterGroups, properties: ['dealname','shopify_order_id','shopify_order_number'], limit: 100 },
         { headers: this.headers }
       );
       return response.data.results || [];
