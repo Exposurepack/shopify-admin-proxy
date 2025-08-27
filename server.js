@@ -1791,48 +1791,9 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
 
     // Extract address information from multiple sources
     console.log(`🏠 Extracting address information...`);
-    console.log(`📋 Deal properties:`, deal.properties);
-    console.log(`🔍 Deal properties with address info:`, 
-      Object.keys(deal.properties).filter(key => 
-        key.toLowerCase().includes('address') || 
-        key.toLowerCase().includes('street') ||
-        key.toLowerCase().includes('city') ||
-        key.toLowerCase().includes('state') ||
-        key.toLowerCase().includes('zip') ||
-        key.toLowerCase().includes('ship') ||
-        key.toLowerCase().includes('bill') ||
-        key.toLowerCase().includes('delivery')
-      )
-    );
-    console.log(`📋 Contact properties:`, contactProps);
-    console.log(`🔍 Contact properties with address info:`, 
-      Object.keys(contactProps).filter(key => 
-        key.toLowerCase().includes('address') || 
-        key.toLowerCase().includes('street') ||
-        key.toLowerCase().includes('city') ||
-        key.toLowerCase().includes('state') ||
-        key.toLowerCase().includes('zip') ||
-        key.toLowerCase().includes('country')
-      )
-    );
-    console.log(`📋 Invoice info:`, invoiceInfo);
     
     // Debug: Log all available invoice properties to see what address fields exist
-    if (invoiceInfo && invoiceInfo.properties) {
-      console.log(`🔍 All invoice properties available:`, Object.keys(invoiceInfo.properties));
-      console.log(`🔍 Invoice properties with 'address' in name:`, 
-        Object.keys(invoiceInfo.properties).filter(key => 
-          key.toLowerCase().includes('address') || 
-          key.toLowerCase().includes('street') ||
-          key.toLowerCase().includes('city') ||
-          key.toLowerCase().includes('state') ||
-          key.toLowerCase().includes('zip') ||
-          key.toLowerCase().includes('ship') ||
-          key.toLowerCase().includes('bill')
-        )
-      );
-      console.log(`🔍 Full invoice properties object:`, JSON.stringify(invoiceInfo.properties, null, 2));
-    }
+    // Suppress verbose invoice property dumps
     
     // Helper function to extract address from deal properties
     const getDealAddress = (type = 'shipping') => {
@@ -2455,19 +2416,18 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         if (ip.hs_recipient_shipping_name) pushNote('invoice.recipient_name', ip.hs_recipient_shipping_name);
       }
 
-      // As a compact JSON payload
-      const notesPayload = JSON.stringify({
-        hubspot_deal_id: String(dealId),
-        deal_name: dealName,
-        items: notes
-      });
+      // Render as readable multi-line text (definition expects multi_line_text_field)
+      const lines = [];
+      lines.push(`Deal: ${dealName} (ID ${dealId})`);
+      notes.forEach((n, i) => lines.push(`${i + 1}. [${n.source}] ${n.text}`));
+      const notesPayload = lines.join('\n');
 
       await metafieldManager.setMetafield(
         orderGID,
         'custom',
         'notes',
         notesPayload,
-        'json'
+        'multi_line_text_field'
       );
       console.log(`🗒️ Saved HubSpot notes to metafield custom.notes (${notes.length} items)`);
     } catch (notesErr) {
@@ -3677,6 +3637,74 @@ app.get("/rest/locations", async (req, res) => {
   }
 });
 
+/**
+ * Update order shipping address
+ */
+app.put("/orders/:id/shipping-address", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const legacyId = id.replace(/\D/g, ''); // Extract numeric ID
+    const { shipping_address } = req.body;
+    
+    if (!shipping_address) {
+      return res.status(400).json({ 
+        error: "shipping_address is required",
+        message: "Please provide shipping address data to update"
+      });
+    }
+    
+    console.log(`📮 Updating shipping address for order: ${legacyId}`);
+    console.log(`📮 New address data:`, shipping_address);
+    
+    // Update order via Shopify REST API
+    const updateData = {
+      order: {
+        id: parseInt(legacyId),
+        shipping_address: {
+          first_name: shipping_address.first_name || '',
+          last_name: shipping_address.last_name || '',
+          name: shipping_address.name || `${shipping_address.first_name || ''} ${shipping_address.last_name || ''}`.trim(),
+          company: shipping_address.company || '',
+          address1: shipping_address.address1 || '',
+          address2: shipping_address.address2 || '',
+          city: shipping_address.city || '',
+          province: shipping_address.province || '',
+          province_code: shipping_address.province_code || '',
+          country: shipping_address.country || '',
+          country_code: shipping_address.country_code || '',
+          zip: shipping_address.zip || '',
+          phone: shipping_address.phone || ''
+        }
+      }
+    };
+    
+    // Use REST API to update the order
+    const updatedOrder = await restClient.put(`/orders/${legacyId}.json`, updateData);
+    
+    console.log(`✅ Successfully updated shipping address for order ${legacyId}`);
+    
+    res.json({
+      success: true,
+      message: "Shipping address updated successfully",
+      order: updatedOrder.order,
+      shipping_address: updatedOrder.order.shipping_address
+    });
+    
+  } catch (error) {
+    console.error("❌ Error updating shipping address:", error);
+    console.error("❌ Error details:", error.response?.data || error.message);
+    
+    const statusCode = error.response?.status || 500;
+    const errorMessage = error.response?.data?.errors || error.message || "Failed to update shipping address";
+    
+    res.status(statusCode).json({
+      error: "Failed to update shipping address",
+      message: errorMessage,
+      details: error.response?.data
+    });
+  }
+});
+
 // Fetch a single customer by ID (returns tags among other fields)
 app.get("/rest/customers/:id", async (req, res) => {
   try {
@@ -4653,5 +4681,6 @@ app.listen(PORT, () => {
   console.log("   📤 POST /upload-file       - File uploads");
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
+  console.log("   📮 PUT  /orders/:id/shipping-address - Update order shipping address");
   console.log("✅ ===============================================");
 }); 
