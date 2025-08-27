@@ -4493,6 +4493,18 @@ app.post("/shopify-webhook", async (req, res) => {
       });
     }
 
+    // Extra guard: if a HubSpot deal already exists for this Shopify order, skip creating another
+    try {
+      const existingDeals = await hubspotClient.searchDealsByShopifyOrder(order.id, order.name);
+      if (Array.isArray(existingDeals) && existingDeals.length > 0) {
+        console.log(`🛑 Existing HubSpot deal(s) found for order ${order.name}. Skipping creation.`);
+        markOrderProcessed(order.id);
+        return res.status(200).json({ received: true, processed: false, message: 'Existing deal found, skipped', orderId: order.id });
+      }
+    } catch (searchErr) {
+      console.warn(`⚠️ Failed to search existing HubSpot deals for order ${order.name}:`, searchErr.message);
+    }
+
     // Create HubSpot deal from Shopify order
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
     // Mark order processed to prevent rapid duplicate processing
