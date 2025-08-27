@@ -2514,6 +2514,7 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
 // ==================================================
 const processedHubspotDeals = new Map(); // dealId -> timestamp
 const processedShopifyOrders = new Map(); // orderId -> timestamp
+const processedShopifyCustomers = new Map(); // customerId -> timestamp
 
 // In-flight concurrency locks to prevent simultaneous processing for same deal
 const processingDeals = new Set(); // dealId currently being processed
@@ -2560,6 +2561,21 @@ const markOrderProcessed = (orderId) => {
   } catch (_) {}
 };
 
+const wasCustomerRecentlyProcessed = (customerId, ttlMs = 10 * 60 * 1000) => {
+  try {
+    const ts = processedShopifyCustomers.get(String(customerId));
+    return !!ts && (Date.now() - ts) < ttlMs;
+  } catch (_) {
+    return false;
+  }
+};
+
+const markCustomerProcessed = (customerId) => {
+  try {
+    processedShopifyCustomers.set(String(customerId), Date.now());
+  } catch (_) {}
+};
+
 // Periodically purge old processed entries (every 15 minutes)
 setInterval(() => {
   try {
@@ -2572,6 +2588,11 @@ setInterval(() => {
     for (const [orderId, ots] of processedShopifyOrders.entries()) {
       if ((now - ots) > (30 * 60 * 1000)) {
         processedShopifyOrders.delete(orderId);
+      }
+    }
+    for (const [customerId, cts] of processedShopifyCustomers.entries()) {
+      if ((now - cts) > (30 * 60 * 1000)) {
+        processedShopifyCustomers.delete(customerId);
       }
     }
   } catch (_) {}
@@ -4418,14 +4439,16 @@ app.post("/shopify-webhook", async (req, res) => {
   
   try {
     console.log("🛒 Shopify webhook received - Order created");
-    console.log("🔍 Headers:", {
-      'x-shopify-topic': req.headers['x-shopify-topic'],
-      'x-shopify-shop-domain': req.headers['x-shopify-shop-domain'],
-      'x-shopify-webhook-id': req.headers['x-shopify-webhook-id'],
-      'content-type': req.headers['content-type'],
-      'user-agent': req.headers['user-agent']
-    });
-    console.log("🔍 Raw body type:", typeof req.body);
+    if (LOG_VERBOSE) {
+      console.log("🔍 Headers:", {
+        'x-shopify-topic': req.headers['x-shopify-topic'],
+        'x-shopify-shop-domain': req.headers['x-shopify-shop-domain'],
+        'x-shopify-webhook-id': req.headers['x-shopify-webhook-id'],
+        'content-type': req.headers['content-type'],
+        'user-agent': req.headers['user-agent']
+      });
+    }
+    if (LOG_VERBOSE) console.log("🔍 Raw body type:", typeof req.body);
     
     // Verify this is an order creation webhook
     const webhookTopic = req.headers['x-shopify-topic'];
@@ -4542,15 +4565,84 @@ app.post("/shopify-webhook", async (req, res) => {
 });
 
 /**
+ * Shopify customer webhook (create/update/enable/disable)
+ * Syncs customer to HubSpot contact without loops
+ */
+app.post("/shopify-customer-webhook", async (req, res) => {
+  try {
+    const topic = req.headers['x-shopify-topic'] || '';
+    const isCustomerEvent = /customers\//i.test(topic);
+    if (!isCustomerEvent) {
+      return res.status(200).json({ received: true, processed: false, message: 'Ignored non-customer webhook' });
+    }
+
+    const customer = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    if (!customer || !customer.id || !customer.email) {
+      return res.status(200).json({ received: true, processed: false, message: 'Invalid customer payload' });
+    }
+
+    // Idempotency on customer events
+    if (wasCustomerRecentlyProcessed(customer.id)) {
+      return res.status(200).json({ received: true, processed: false, message: 'Duplicate customer webhook skipped' });
+    }
+
+    // Map Shopify customer → HubSpot contact properties
+    const contactData = {
+      email: customer.email,
+      firstname: customer.first_name || '',
+      lastname: customer.last_name || '',
+      phone: customer.phone || '',
+    };
+    const addr = customer.default_address || {};
+    contactData.address = addr.address1 || '';
+    contactData.city = addr.city || '';
+    contactData.state = addr.province || '';
+    contactData.country = addr.country || '';
+    contactData.zip = addr.zip || '';
+    contactData.company = addr.company || '';
+
+    // Upsert to HubSpot
+    try {
+      await hubspotClient.createOrUpdateContact(contactData);
+    } catch (err) {
+      // If conflict, fallback to search and patch
+      try {
+        const searchRes = await axios.post(
+          `${hubspotClient.baseURL}/crm/v3/objects/contacts/search`,
+          { filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: contactData.email }] }] },
+          { headers: hubspotClient.headers }
+        );
+        const hit = Array.isArray(searchRes?.data?.results) ? searchRes.data.results[0] : null;
+        if (hit && hit.id) {
+          await axios.patch(
+            `${hubspotClient.baseURL}/crm/v3/objects/contacts/${hit.id}`,
+            { properties: contactData },
+            { headers: hubspotClient.headers }
+          );
+        }
+      } catch (_) {}
+    }
+
+    // Mark processed
+    markCustomerProcessed(customer.id);
+    return res.status(200).json({ received: true, processed: true });
+  } catch (error) {
+    return res.status(200).json({ received: true, processed: false, error: error.message });
+  }
+});
+
+/**
  * HubSpot webhook endpoint for deal stage changes
  * Bypasses authentication for webhook calls
  */
 app.post("/webhook", async (req, res) => {
   try {
     console.log("🎯 HubSpot webhook received");
-    console.log("🔍 Headers:", req.headers);
-    console.log("🔍 Raw body type:", typeof req.body);
-    console.log("🔍 Raw body:", req.body);
+    if (LOG_VERBOSE) {
+      console.log("🔍 Headers:", req.headers);
+      console.log("🔍 Raw body type:", typeof req.body);
+      console.log("🔍 Raw body:", req.body);
+    }
 
     if (!hubspotClient) {
       console.warn("⚠️ HubSpot webhook received but client not configured");
