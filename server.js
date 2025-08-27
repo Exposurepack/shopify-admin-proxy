@@ -1618,6 +1618,18 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
   console.log(`🔄 Creating Shopify order from HubSpot deal: ${dealId}`);
 
   try {
+    // Idempotency and duplicate checks
+    if (wasDealRecentlyProcessed(dealId)) {
+      console.log(`🛑 Skipping import for deal ${dealId}: recently processed`);
+      return { order: null, skipped: true, reason: 'recently processed' };
+    }
+    const existingOrder = await findExistingShopifyOrderForDeal(dealId);
+    if (existingOrder) {
+      console.log(`🛑 Order already exists for deal ${dealId}: #${existingOrder?.name || existingOrder?.order_number || existingOrder?.id}`);
+      markDealProcessed(dealId);
+      return { order: existingOrder, skipped: true, reason: 'existing order' };
+    }
+
     // Fetch deal details from HubSpot
     const deal = await hubspotClient.getDeal(dealId);
     const contacts = await hubspotClient.getAssociatedContacts(dealId);
@@ -1761,14 +1773,21 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
                        deal.properties.dealname?.split(' - ')[0] || // Extract from deal name
                        'HubSpot Customer';
 
-    const customer = {
-      first_name: firstName,
-      last_name: lastName,
-      email: contactProps.email || `hubspot-${dealId}@placeholder.com`,
-      phone: formattedPhone,
-      // Note: Shopify customer object doesn't have company field, 
-      // but we'll ensure it's in shipping/billing addresses
-    };
+    // Attach to existing Shopify customer by email when possible to avoid validation
+    let customer = null;
+    const customerEmail = contactProps.email || `hubspot-${dealId}@placeholder.com`;
+    const existingCustomer = await findShopifyCustomerByEmail(customerEmail);
+    if (existingCustomer && existingCustomer.id) {
+      console.log(`👤 Matched existing Shopify customer by email: ${customerEmail} → ID ${existingCustomer.id}`);
+      customer = { id: existingCustomer.id };
+    } else {
+      // Create via order with minimal customer fields (omit phone to avoid uniqueness conflicts)
+      customer = {
+        first_name: firstName,
+        last_name: lastName,
+        email: customerEmail
+      };
+    }
 
     // Extract address information from multiple sources
     console.log(`🏠 Extracting address information...`);
@@ -2231,6 +2250,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       order: {
         line_items: shopifyLineItems,
         customer: customer,
+        email: customerEmail,
         billing_address: billingAddress,
         shipping_address: shippingAddress,
         financial_status: 'paid', // Mark as paid by default as requested
@@ -2420,6 +2440,72 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
   }
 } else {
   console.log("ℹ️ HubSpot client not initialized - token not provided");
+}
+
+// ==================================================
+// Idempotency helpers to prevent duplicate order loops
+// ==================================================
+const processedHubspotDeals = new Map(); // dealId -> timestamp
+
+const wasDealRecentlyProcessed = (dealId, ttlMs = 10 * 60 * 1000) => {
+  try {
+    const ts = processedHubspotDeals.get(String(dealId));
+    return !!ts && (Date.now() - ts) < ttlMs;
+  } catch (_) {
+    return false;
+  }
+};
+
+const markDealProcessed = (dealId) => {
+  try {
+    processedHubspotDeals.set(String(dealId), Date.now());
+  } catch (_) {}
+};
+
+// Periodically purge old processed entries (every 15 minutes)
+setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const [dealId, ts] of processedHubspotDeals.entries()) {
+      if ((now - ts) > (30 * 60 * 1000)) { // 30 minutes TTL for cleanup
+        processedHubspotDeals.delete(dealId);
+      }
+    }
+  } catch (_) {}
+}, 15 * 60 * 1000);
+
+// Quick lookup to see if we've already created a Shopify order for a HubSpot deal
+async function findExistingShopifyOrderForDeal(dealId) {
+  try {
+    const res = await restClient.get(`/orders.json?status=any&limit=50&fields=id,name,tags,order_number,note,note_attributes`);
+    const orders = Array.isArray(res?.orders) ? res.orders : [];
+    const dealTag = `hubspot-deal-${dealId}`.toLowerCase();
+    const match = orders.find(o => {
+      const tags = (Array.isArray(o.tags) ? o.tags.join(',') : (o.tags || '')).toLowerCase();
+      const tagHit = tags.includes(dealTag);
+      const noteAttrs = Array.isArray(o.note_attributes) ? o.note_attributes : [];
+      const attrHit = noteAttrs.some(na => (String(na.name || '').toLowerCase() === 'hubspot_deal_id') && String(na.value) === String(dealId));
+      return tagHit || attrHit;
+    });
+    return match || null;
+  } catch (err) {
+    console.warn(`⚠️ Failed to search existing Shopify orders for deal ${dealId}:`, err.message);
+    return null;
+  }
+}
+
+// Find a Shopify customer by email (returns first match or null)
+async function findShopifyCustomerByEmail(email) {
+  if (!email) return null;
+  try {
+    const query = `email:${email}`;
+    const res = await restClient.get(`/customers/search.json?query=${encodeURIComponent(query)}`);
+    const customers = Array.isArray(res?.customers) ? res.customers : [];
+    return customers.length > 0 ? customers[0] : null;
+  } catch (err) {
+    console.warn(`⚠️ Failed to search Shopify customer by email ${email}:`, err.message);
+    return null;
+  }
 }
 
 // ===========================================
@@ -4335,12 +4421,31 @@ app.post("/webhook", async (req, res) => {
 
     // Check if this is a dealstage change to closedwon
     if (propertyName === 'dealstage' && value === 'closedwon') {
-      console.log(`🎉 Deal ${objectId} moved to 'closedwon' - creating Shopify order`);
+      console.log(`🎉 Deal ${objectId} moved to 'closedwon'`);
+
+      // Idempotency: skip if we've processed this deal recently
+      if (wasDealRecentlyProcessed(objectId)) {
+        console.log(`🛑 Skipping duplicate processing for deal ${objectId} (recently processed)`);
+        return res.status(200).json({ received: true, processed: false, message: 'Duplicate closedwon event skipped', dealId: objectId });
+      }
+
+      // Secondary guard: if an order already exists for this deal, skip
+      const existing = await findExistingShopifyOrderForDeal(objectId);
+      if (existing) {
+        console.log(`🛑 Shopify order already exists for deal ${objectId} → Order #${existing?.name || existing?.order_number || existing?.id}`);
+        markDealProcessed(objectId);
+        return res.status(200).json({ received: true, processed: false, message: 'Order already exists for deal', dealId: objectId, orderId: existing.id, orderNumber: existing.name || existing.order_number });
+      }
+
+      console.log(`🚀 Creating Shopify order from HubSpot deal ${objectId}`);
 
       try {
         const result = await createShopifyOrderFromHubspotInvoice(objectId);
         
         console.log(`✅ Successfully created Shopify order from HubSpot deal ${objectId}`);
+
+        // Mark processed to avoid re-runs in quick succession
+        markDealProcessed(objectId);
         
         return res.status(200).json({
           received: true,
@@ -4352,6 +4457,9 @@ app.post("/webhook", async (req, res) => {
 
       } catch (orderError) {
         console.error(`❌ Failed to create Shopify order from deal ${objectId}:`, orderError.message);
+
+        // Still mark as processed briefly to prevent tight retry loops from HubSpot
+        markDealProcessed(objectId);
         
         // Still return 200 to prevent HubSpot retries, but log the error
         return res.status(200).json({
