@@ -220,6 +220,7 @@ const authenticate = (req, res, next) => {
   if (
     req.path === '/webhook' ||
     req.path === '/shopify-webhook' ||
+    req.path === '/shopify-customer-webhook' ||
     req.path === '/fulfillments/test' ||
     req.path === '/fulfillments/v2/test' ||
     (req.path === '/fulfillments' && req.method === 'GET') ||
@@ -4601,12 +4602,14 @@ app.post("/shopify-webhook", async (req, res) => {
 app.post("/shopify-customer-webhook", async (req, res) => {
   try {
     const topic = req.headers['x-shopify-topic'] || '';
+    console.log("🧩 Shopify customer webhook received", { topic });
     const isCustomerEvent = /customers\//i.test(topic);
     if (!isCustomerEvent) {
       return res.status(200).json({ received: true, processed: false, message: 'Ignored non-customer webhook' });
     }
 
     const customer = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    console.log("🧩 Customer payload", { id: customer?.id, email: customer?.email });
     if (!customer || !customer.id || !customer.email) {
       return res.status(200).json({ received: true, processed: false, message: 'Invalid customer payload' });
     }
