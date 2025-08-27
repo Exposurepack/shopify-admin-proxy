@@ -2405,6 +2405,79 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       );
     }
 
+    // Save HubSpot deal notes into Shopify metafield custom.notes (JSON)
+    try {
+      // Attempt to gather notes from available objects: deal description, invoice/quote notes, contact/company
+      const notes = [];
+      const pushNote = (source, text) => {
+        const t = (text || '').toString().trim();
+        if (t.length > 0) notes.push({ source, text: t });
+      };
+
+      // Deal description
+      pushNote('deal.description', deal?.properties?.description);
+
+      // HubSpot associated notes (CRM notes)
+      try {
+        const assocRes = await axios.get(
+          `${hubspotClient.baseURL}/crm/v3/objects/deals/${dealId}/associations/notes`,
+          { headers: hubspotClient.headers, timeout: 30000 }
+        );
+        const noteIds = Array.isArray(assocRes?.data?.results)
+          ? assocRes.data.results.map(r => r.id)
+          : [];
+        const limited = noteIds.slice(0, 10); // cap to 10 notes
+        for (const nid of limited) {
+          try {
+            const noteRes = await axios.get(
+              `${hubspotClient.baseURL}/crm/v3/objects/notes/${nid}`,
+              {
+                headers: hubspotClient.headers,
+                params: { properties: ['hs_note_body','hs_createdate','hs_lastmodifieddate','hubspot_owner_id'].join(',') },
+                timeout: 30000
+              }
+            );
+            const np = noteRes?.data?.properties || {};
+            pushNote('hubspot.note', np.hs_note_body);
+          } catch (nrErr) {}
+        }
+      } catch (assocErr) {
+        // ignore
+      }
+
+      // Contact properties that could be note-like
+      if (contacts && contacts.length > 0) {
+        const cp = contacts[0]?.properties || {};
+        pushNote('contact.address', [cp.address, cp.city, cp.state, cp.zip, cp.country].filter(Boolean).join(', '));
+      }
+
+      // Company notes via invoice association (recipient/company address already captured but include label)
+      if (invoiceInfo && invoiceInfo.properties) {
+        const ip = invoiceInfo.properties;
+        const receiverAddr = [ip.hs_recipient_company_address, ip.hs_recipient_company_city, ip.hs_recipient_company_state, ip.hs_recipient_company_zip].filter(Boolean).join(', ');
+        pushNote('invoice.recipient_address', receiverAddr);
+        if (ip.hs_recipient_shipping_name) pushNote('invoice.recipient_name', ip.hs_recipient_shipping_name);
+      }
+
+      // As a compact JSON payload
+      const notesPayload = JSON.stringify({
+        hubspot_deal_id: String(dealId),
+        deal_name: dealName,
+        items: notes
+      });
+
+      await metafieldManager.setMetafield(
+        orderGID,
+        'custom',
+        'notes',
+        notesPayload,
+        'json'
+      );
+      console.log(`🗒️ Saved HubSpot notes to metafield custom.notes (${notes.length} items)`);
+    } catch (notesErr) {
+      console.warn('⚠️ Failed to save HubSpot notes to metafield:', notesErr.message);
+    }
+
     console.log(`📝 Added HubSpot tracking metafields to order ${createdOrder.name}`);
 
     return {
