@@ -4620,23 +4620,32 @@ app.post("/shopify-customer-webhook", async (req, res) => {
     }
 
     // Map Shopify customer → HubSpot contact properties
+    const phoneCandidates = [
+      customer.phone,
+      customer?.default_address?.phone,
+      ...(Array.isArray(customer?.addresses) ? customer.addresses.map(a => a?.phone).filter(Boolean) : [])
+    ].filter(Boolean);
+    const phone = phoneCandidates[0] || '';
+
+    const addr = customer.default_address || {};
     const contactData = {
       email: customer.email,
       firstname: customer.first_name || '',
       lastname: customer.last_name || '',
-      phone: customer.phone || '',
+      phone,
+      address: addr.address1 || '',
+      city: addr.city || '',
+      state: addr.province || '',
+      country: addr.country || '',
+      zip: addr.zip || '',
+      company: addr.company || ''
     };
-    const addr = customer.default_address || {};
-    contactData.address = addr.address1 || '';
-    contactData.city = addr.city || '';
-    contactData.state = addr.province || '';
-    contactData.country = addr.country || '';
-    contactData.zip = addr.zip || '';
-    contactData.company = addr.company || '';
+    console.log("🧩 Upserting contact to HubSpot", { email: contactData.email, phone: contactData.phone });
 
     // Upsert to HubSpot
     try {
-      await hubspotClient.createOrUpdateContact(contactData);
+      const upserted = await hubspotClient.createOrUpdateContact(contactData);
+      console.log("✅ HubSpot contact upserted", { id: upserted?.id || upserted?.hs_object_id, email: contactData.email });
     } catch (err) {
       // If conflict, fallback to search and patch
       try {
@@ -4647,13 +4656,16 @@ app.post("/shopify-customer-webhook", async (req, res) => {
         );
         const hit = Array.isArray(searchRes?.data?.results) ? searchRes.data.results[0] : null;
         if (hit && hit.id) {
-          await axios.patch(
+          const patchRes = await axios.patch(
             `${hubspotClient.baseURL}/crm/v3/objects/contacts/${hit.id}`,
             { properties: contactData },
             { headers: hubspotClient.headers }
           );
+          console.log("✅ HubSpot contact patched", { id: hit.id, email: contactData.email });
         }
-      } catch (_) {}
+      } catch (fallbackErr) {
+        console.error("❌ HubSpot contact upsert failed", fallbackErr.response?.data || fallbackErr.message);
+      }
     }
 
     // Mark processed
