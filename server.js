@@ -1619,6 +1619,10 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
 
   try {
     // Idempotency and duplicate checks
+    if (!acquireDealLock(dealId)) {
+      console.log(`🛑 Another process is already handling deal ${dealId}. Skipping import.`);
+      return { order: null, skipped: true, reason: 'in-flight duplicate' };
+    }
     if (wasDealRecentlyProcessed(dealId)) {
       console.log(`🛑 Skipping import for deal ${dealId}: recently processed`);
       return { order: null, skipped: true, reason: 'recently processed' };
@@ -2417,6 +2421,8 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
   } catch (error) {
     console.error(`❌ Failed to create Shopify order from HubSpot deal ${dealId}:`, error.message);
     throw error;
+  } finally {
+    releaseDealLock(dealId);
   }
 }
 
@@ -2446,6 +2452,21 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
 // Idempotency helpers to prevent duplicate order loops
 // ==================================================
 const processedHubspotDeals = new Map(); // dealId -> timestamp
+
+// In-flight concurrency locks to prevent simultaneous processing for same deal
+const processingDeals = new Set(); // dealId currently being processed
+
+const acquireDealLock = (dealId) => {
+  const key = String(dealId);
+  if (processingDeals.has(key)) return false;
+  processingDeals.add(key);
+  return true;
+};
+
+const releaseDealLock = (dealId) => {
+  const key = String(dealId);
+  if (processingDeals.has(key)) processingDeals.delete(key);
+};
 
 const wasDealRecentlyProcessed = (dealId, ttlMs = 10 * 60 * 1000) => {
   try {
@@ -4294,8 +4315,10 @@ app.post("/shopify-webhook", async (req, res) => {
     const hasHubspotTag = tagsLower.includes('hubspot');
     const hasHubspotImportTag = tagsLower.includes('hubspot-import');
     const hasHubspotNoteAttr = Array.isArray(order.note_attributes) && order.note_attributes.some(na => {
-      const name = (na.name || '').toLowerCase();
-      const value = (na.value || '').toLowerCase();
+      const name = String(na?.name ?? '').toLowerCase();
+      const rawVal = na?.value;
+      const valueStr = rawVal == null ? '' : (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal));
+      const value = valueStr.toLowerCase();
       return name === 'hubspot_deal_id' || value.includes('hubspot') || value === 'hubspot_webhook';
     });
 
@@ -4439,6 +4462,12 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`🚀 Creating Shopify order from HubSpot deal ${objectId}`);
 
+      // Concurrency lock to prevent simultaneous processing of same deal
+      if (!acquireDealLock(objectId)) {
+        console.log(`🛑 Another process is already handling deal ${objectId}. Skipping.`);
+        return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped', dealId: objectId });
+      }
+
       try {
         const result = await createShopifyOrderFromHubspotInvoice(objectId);
         
@@ -4469,6 +4498,8 @@ app.post("/webhook", async (req, res) => {
           error: orderError.message,
           dealId: objectId
         });
+      } finally {
+        releaseDealLock(objectId);
       }
 
     } else {
