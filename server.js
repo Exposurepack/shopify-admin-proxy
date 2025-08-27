@@ -1438,7 +1438,22 @@ async function createHubSpotDealFromShopifyOrder(order) {
       contact = await hubspotClient.createOrUpdateContact(contactData);
       console.log(`👤 Contact ready: ${contact.id} - ${contactData.email}`);
     } catch (contactError) {
-      console.error(`❌ Failed to create contact, continuing without: ${contactError.message}`);
+      console.error(`❌ Failed to create contact, attempting fallback association: ${contactError.message}`);
+      try {
+        // Fallback: find existing contact by email directly and use it
+        const searchRes = await axios.post(
+          `${hubspotClient.baseURL}/crm/v3/objects/contacts/search`,
+          { filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: contactData.email }] }] },
+          { headers: hubspotClient.headers }
+        );
+        const hit = Array.isArray(searchRes?.data?.results) ? searchRes.data.results[0] : null;
+        if (hit && hit.id) {
+          contact = hit;
+          console.log(`👤 Using existing HubSpot contact by search: ${hit.id} - ${contactData.email}`);
+        }
+      } catch (fallbackErr) {
+        console.warn(`⚠️ Contact search fallback failed: ${fallbackErr.message}`);
+      }
     }
 
     // Process line items - separate shipping items from products
@@ -1531,6 +1546,24 @@ async function createHubSpotDealFromShopifyOrder(order) {
     console.log(`✅ Created HubSpot deal: ${deal.id} - ${dealData.dealname}`);
 
     // Associate contact with deal if both exist
+    if (!contact) {
+      // One more attempt: look up by order customer email
+      const backupEmail = order?.customer?.email || order?.email || contactData.email;
+      if (backupEmail) {
+        try {
+          const searchRes = await axios.post(
+            `${hubspotClient.baseURL}/crm/v3/objects/contacts/search`,
+            { filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: backupEmail }] }] },
+            { headers: hubspotClient.headers }
+          );
+          const hit = Array.isArray(searchRes?.data?.results) ? searchRes.data.results[0] : null;
+          if (hit && hit.id) {
+            contact = hit;
+            console.log(`👤 Fallback contact by order email: ${hit.id} - ${backupEmail}`);
+          }
+        } catch (_) {}
+      }
+    }
     if (contact && deal) {
       await hubspotClient.associateContactWithDeal(contact.id, deal.id);
     }
@@ -4537,7 +4570,15 @@ app.post("/webhook", async (req, res) => {
     console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, value=${value}`);
     console.log(`🔍 Deal data keys:`, Object.keys(dealData));
 
-    // Check if this is a dealstage change to closedwon
+    // Check if this is a dealstage change to closedwon and originated from the CRM UI (not our app)
+    const fromIntegration = (dealData.changeSource && String(dealData.changeSource).toUpperCase() !== 'CRM_UI');
+    const sourceId = String(dealData.sourceId || '');
+    const isSelfEvent = sourceId.includes(process.env.HUBSPOT_APP_ID || '');
+    if (fromIntegration && isSelfEvent) {
+      console.log(`🛑 Ignoring closedwon from integration/self to prevent ping-pong (sourceId=${sourceId})`);
+      return res.status(200).json({ received: true, processed: false, message: 'Ignored integration-originated event' });
+    }
+
     if (propertyName === 'dealstage' && value === 'closedwon') {
       console.log(`🎉 Deal ${objectId} moved to 'closedwon'`);
 
