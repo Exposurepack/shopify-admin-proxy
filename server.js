@@ -1619,10 +1619,6 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
 
   try {
     // Idempotency and duplicate checks
-    if (!acquireDealLock(dealId)) {
-      console.log(`🛑 Another process is already handling deal ${dealId}. Skipping import.`);
-      return { order: null, skipped: true, reason: 'in-flight duplicate' };
-    }
     if (wasDealRecentlyProcessed(dealId)) {
       console.log(`🛑 Skipping import for deal ${dealId}: recently processed`);
       return { order: null, skipped: true, reason: 'recently processed' };
@@ -2494,8 +2490,6 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
   } catch (error) {
     console.error(`❌ Failed to create Shopify order from HubSpot deal ${dealId}:`, error.message);
     throw error;
-  } finally {
-    releaseDealLock(dealId);
   }
 }
 
@@ -4535,13 +4529,12 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`🚀 Creating Shopify order from HubSpot deal ${objectId}`);
 
-      // Concurrency lock to prevent simultaneous processing of same deal
-      if (!acquireDealLock(objectId)) {
-        console.log(`🛑 Another process is already handling deal ${objectId}. Skipping.`);
-        return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped', dealId: objectId });
-      }
-
       try {
+        // Concurrency lock to prevent simultaneous processing of same deal
+        if (!acquireDealLock(objectId)) {
+          console.log(`🛑 Another process is already handling deal ${objectId}. Skipping.`);
+          return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped', dealId: objectId });
+        }
         const result = await createShopifyOrderFromHubspotInvoice(objectId);
         
         console.log(`✅ Successfully created Shopify order from HubSpot deal ${objectId}`);
