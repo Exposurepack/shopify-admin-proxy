@@ -4779,11 +4779,18 @@ app.post("/webhook", async (req, res) => {
                 }
               };
               if (existing) {
+                console.log("🧩 Updating Shopify customer from HubSpot", { shopify_customer_id: existing.id, email });
                 await restClient.put(`/customers/${existing.id}.json`, payload);
+                console.log("✅ Shopify customer updated", { shopify_customer_id: existing.id });
               } else {
-                await restClient.post(`/customers.json`, payload);
+                console.log("🧩 Creating Shopify customer from HubSpot", { email });
+                const created = await restClient.post(`/customers.json`, payload);
+                console.log("✅ Shopify customer created", { shopify_customer_id: created?.customer?.id });
               }
-              markHubspotContactProcessed(contactId);
+              // Only mark processed for integration-originated changes to avoid skipping CRM_UI updates
+              if ((dealData.changeSource || '').toUpperCase() !== 'CRM_UI') {
+                markHubspotContactProcessed(contactId);
+              }
             } catch (_) {}
           }
         }
