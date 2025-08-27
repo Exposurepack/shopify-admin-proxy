@@ -2227,10 +2227,37 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     console.log(`   💰 Billing: ${getAddressSource(billingAddress, false)} ->`, billingAddress);
 
     // Create order via Shopify REST API
+    // Try to link to an existing Shopify customer by email to avoid duplicate phone/email errors
+    let existingShopifyCustomerId = null;
+    const emailForOrder = contactProps.email || `hubspot-${dealId}@placeholder.com`;
+    try {
+      if (emailForOrder) {
+        const existingCustomers = await restClient.get('/customers/search.json', { query: `email:${emailForOrder}` });
+        if (existingCustomers && Array.isArray(existingCustomers.customers) && existingCustomers.customers.length > 0) {
+          existingShopifyCustomerId = existingCustomers.customers[0].id;
+          console.log(`🔗 Matched existing Shopify customer by email: ${emailForOrder} → ${existingShopifyCustomerId}`);
+        }
+      }
+    } catch (lookupErr) {
+      console.log(`ℹ️ Customer email lookup skipped/failed: ${lookupErr.message}`);
+    }
+
+    // Prepare customer payload for the order
+    const customerForOrder = existingShopifyCustomerId
+      ? { id: parseInt(existingShopifyCustomerId) }
+      : {
+          first_name: firstName,
+          last_name: lastName,
+          email: emailForOrder,
+          ...(formattedPhone ? { phone: formattedPhone } : {})
+        };
+
     const orderData = {
       order: {
         line_items: shopifyLineItems,
-        customer: customer,
+        customer: customerForOrder,
+        // Also set top-level email so the order can be created as a guest if we need to drop the customer object on retry
+        email: emailForOrder,
         billing_address: billingAddress,
         shipping_address: shippingAddress,
         financial_status: 'paid', // Mark as paid by default as requested
@@ -2320,14 +2347,11 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       createdOrder = response.order;
     } catch (shopifyError) {
       console.error(`❌ Shopify order creation failed:`, shopifyError.message);
-      
+      let errorBody = shopifyError.response?.body || shopifyError.response?.data;
       if (shopifyError.response) {
         console.error(`📊 Shopify Error Status:`, shopifyError.response.status);
         console.error(`📋 Shopify Error Headers:`, shopifyError.response.headers);
-        console.error(`📄 Shopify Error Body:`, shopifyError.response.body || shopifyError.response.data);
-        
-        // Try to extract specific validation errors
-        const errorBody = shopifyError.response.body || shopifyError.response.data;
+        console.error(`📄 Shopify Error Body:`, errorBody);
         if (errorBody && errorBody.errors) {
           console.error(`🚨 Specific Shopify validation errors:`);
           if (typeof errorBody.errors === 'object') {
@@ -2339,8 +2363,38 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
           }
         }
       }
-      
-      throw shopifyError;
+
+      // Retry strategy for duplicate phone on customer creation
+      const duplicatePhone = Boolean(
+        (typeof errorBody?.errors === 'object' && (
+          (Array.isArray(errorBody.errors.customer) && errorBody.errors.customer.join(' ').toLowerCase().includes('phone number has already been taken')) ||
+          (typeof errorBody.errors.customer === 'string' && errorBody.errors.customer.toLowerCase().includes('phone number has already been taken'))
+        ))
+      );
+
+      if (!existingShopifyCustomerId && duplicatePhone) {
+        try {
+          console.log(`🔁 Retry without customer.phone to avoid duplicate phone validation`);
+          const retryData = JSON.parse(JSON.stringify(orderData));
+          if (retryData.order && retryData.order.customer) {
+            delete retryData.order.customer.phone;
+          }
+          const retryResp = await restClient.post('/orders.json', retryData);
+          createdOrder = retryResp.order;
+        } catch (retryErr) {
+          // Final fallback: create as guest order (remove customer object, keep email)
+          console.log(`🔁 Second retry as guest order (remove customer object)`);
+          const finalData = JSON.parse(JSON.stringify(orderData));
+          if (finalData.order) {
+            delete finalData.order.customer;
+            finalData.order.email = emailForOrder;
+          }
+          const finalResp = await restClient.post('/orders.json', finalData);
+          createdOrder = finalResp.order;
+        }
+      } else {
+        throw shopifyError;
+      }
     }
 
     console.log(`✅ Successfully created Shopify order: ${createdOrder.name} (ID: ${createdOrder.id})`);
