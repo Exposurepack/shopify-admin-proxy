@@ -2256,8 +2256,8 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       order: {
         line_items: shopifyLineItems,
         customer: customerForOrder,
-        // Also set top-level email so the order can be created as a guest if we need to drop the customer object on retry
-        email: emailForOrder,
+        // Only include top-level email when we are NOT linking to an existing Shopify customer.
+        ...(existingShopifyCustomerId ? {} : { email: emailForOrder }),
         billing_address: billingAddress,
         shipping_address: shippingAddress,
         financial_status: 'paid', // Mark as paid by default as requested
