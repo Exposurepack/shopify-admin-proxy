@@ -2512,6 +2512,7 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
 // Idempotency helpers to prevent duplicate order loops
 // ==================================================
 const processedHubspotDeals = new Map(); // dealId -> timestamp
+const processedShopifyOrders = new Map(); // orderId -> timestamp
 
 // In-flight concurrency locks to prevent simultaneous processing for same deal
 const processingDeals = new Set(); // dealId currently being processed
@@ -2543,6 +2544,21 @@ const markDealProcessed = (dealId) => {
   } catch (_) {}
 };
 
+const wasOrderRecentlyProcessed = (orderId, ttlMs = 10 * 60 * 1000) => {
+  try {
+    const ts = processedShopifyOrders.get(String(orderId));
+    return !!ts && (Date.now() - ts) < ttlMs;
+  } catch (_) {
+    return false;
+  }
+};
+
+const markOrderProcessed = (orderId) => {
+  try {
+    processedShopifyOrders.set(String(orderId), Date.now());
+  } catch (_) {}
+};
+
 // Periodically purge old processed entries (every 15 minutes)
 setInterval(() => {
   try {
@@ -2550,6 +2566,11 @@ setInterval(() => {
     for (const [dealId, ts] of processedHubspotDeals.entries()) {
       if ((now - ts) > (30 * 60 * 1000)) { // 30 minutes TTL for cleanup
         processedHubspotDeals.delete(dealId);
+      }
+    }
+    for (const [orderId, ots] of processedShopifyOrders.entries()) {
+      if ((now - ots) > (30 * 60 * 1000)) {
+        processedShopifyOrders.delete(orderId);
       }
     }
   } catch (_) {}
@@ -4437,6 +4458,12 @@ app.post("/shopify-webhook", async (req, res) => {
     console.log(`👤 Customer: ${order.customer?.email || 'N/A'}`);
     console.log(`📦 Line items: ${order.line_items?.length || 0}`);
 
+    // Order-level idempotency: skip if we've just processed this order ID
+    if (wasOrderRecentlyProcessed(order.id)) {
+      console.log(`🛑 Skipping HubSpot deal creation for order ${order.name}: recently processed`);
+      return res.status(200).json({ received: true, processed: false, message: 'Duplicate order webhook skipped' });
+    }
+
     // Guard: Skip creating HubSpot deal for orders that originated from HubSpot
     const tagsValue = Array.isArray(order.tags) ? order.tags.join(',') : (order.tags || '');
     const tagsLower = String(tagsValue).toLowerCase();
@@ -4468,6 +4495,8 @@ app.post("/shopify-webhook", async (req, res) => {
 
     // Create HubSpot deal from Shopify order
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
+    // Mark order processed to prevent rapid duplicate processing
+    markOrderProcessed(order.id);
 
     const processingTime = Date.now() - startTime;
     console.log(`⏱️ Webhook processing completed in ${processingTime}ms`);
