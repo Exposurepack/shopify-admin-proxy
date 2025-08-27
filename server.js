@@ -1618,6 +1618,25 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
   console.log(`🔄 Creating Shopify order from HubSpot deal: ${dealId}`);
 
   try {
+    // Idempotency guard: if an order already exists with tag hubspot-deal-<dealId>, skip creating another
+    try {
+      const searchQuery = `tag:\"hubspot-deal-${dealId}\"`;
+      const existing = await graphqlClient.query(
+        `query($query: String!) { orders(first: 1, query: $query) { edges { node { id name tags } } } }`,
+        { query: searchQuery }
+      );
+      const edges = existing?.orders?.edges || [];
+      if (edges.length > 0) {
+        const node = edges[0].node;
+        const gid = String(node.id || '');
+        const legacyId = gid.split('/').pop();
+        console.log(`🛑 Order already exists for deal ${dealId}: ${node.name} (${legacyId}) — skipping duplicate creation`);
+        return { order: { id: parseInt(legacyId || '0', 10), name: node.name } };
+      }
+    } catch (idempoErr) {
+      console.log(`ℹ️ Idempotency check skipped/failed: ${idempoErr.message}`);
+    }
+    
     // Fetch deal details from HubSpot
     const deal = await hubspotClient.getDeal(dealId);
     const contacts = await hubspotClient.getAssociatedContacts(dealId);
