@@ -1510,7 +1510,10 @@ async function createHubSpotDealFromShopifyOrder(order) {
       pipeline: pipelineId,
       dealstage: stageId,
       closedate: Date.now(),
-      deal_currency_code: currency
+      deal_currency_code: currency,
+      // Persist Shopify identifiers on the deal to prevent duplicates
+      shopify_order_id: String(order.id),
+      shopify_order_number: String(order.name)
     };
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
@@ -1545,6 +1548,17 @@ async function createHubSpotDealFromShopifyOrder(order) {
       }
     }
     console.log(`✅ Created HubSpot deal: ${deal.id} - ${dealData.dealname}`);
+    // Ensure custom Shopify properties are set (if schema exists)
+    try {
+      await axios.patch(
+        `${hubspotClient.baseURL}/crm/v3/objects/deals/${deal.id}`,
+        { properties: {
+          shopify_order_id: String(order.id),
+          shopify_order_number: String(order.name)
+        }},
+        { headers: hubspotClient.headers }
+      );
+    } catch (_) {}
 
     // Associate contact with deal if both exist
     if (!contact) {
@@ -2515,6 +2529,7 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
 const processedHubspotDeals = new Map(); // dealId -> timestamp
 const processedShopifyOrders = new Map(); // orderId -> timestamp
 const processedShopifyCustomers = new Map(); // customerId -> timestamp
+const processedHubspotContacts = new Map(); // contactId -> timestamp
 
 // In-flight concurrency locks to prevent simultaneous processing for same deal
 const processingDeals = new Set(); // dealId currently being processed
@@ -2573,6 +2588,21 @@ const wasCustomerRecentlyProcessed = (customerId, ttlMs = 10 * 60 * 1000) => {
 const markCustomerProcessed = (customerId) => {
   try {
     processedShopifyCustomers.set(String(customerId), Date.now());
+  } catch (_) {}
+};
+
+const wasHubspotContactRecentlyProcessed = (contactId, ttlMs = 10 * 60 * 1000) => {
+  try {
+    const ts = processedHubspotContacts.get(String(contactId));
+    return !!ts && (Date.now() - ts) < ttlMs;
+  } catch (_) {
+    return false;
+  }
+};
+
+const markHubspotContactProcessed = (contactId) => {
+  try {
+    processedHubspotContacts.set(String(contactId), Date.now());
   } catch (_) {}
 };
 
@@ -4696,13 +4726,55 @@ app.post("/webhook", async (req, res) => {
       });
     }
 
-    const { objectId, propertyName, newValue, propertyValue } = dealData;
+    const { objectId, propertyName, newValue, propertyValue, subscriptionType } = dealData;
     
     // HubSpot can send either 'newValue' or 'propertyValue'
     const value = newValue || propertyValue;
 
     console.log(`🔍 Processing: objectId=${objectId}, propertyName=${propertyName}, value=${value}`);
     console.log(`🔍 Deal data keys:`, Object.keys(dealData));
+
+    // Handle HubSpot contact changes → sync to Shopify (no loops)
+    if (subscriptionType && String(subscriptionType).startsWith('contact.')) {
+      try {
+        const contactId = dealData.objectId;
+        if (contactId && !wasHubspotContactRecentlyProcessed(contactId)) {
+          // Pull contact details
+          const contact = await hubspotClient.getContact(contactId);
+          const p = contact?.properties || {};
+          const email = p.email || null;
+          if (email) {
+            // Upsert to Shopify by email
+            try {
+              const search = await restClient.get(`/customers/search.json?query=${encodeURIComponent(`email:${email}`)}`);
+              const existing = Array.isArray(search?.customers) && search.customers[0];
+              const payload = {
+                customer: {
+                  email,
+                  first_name: p.firstname || '',
+                  last_name: p.lastname || '',
+                  phone: p.phone || undefined,
+                  default_address: {
+                    address1: p.address || p.address1 || '',
+                    city: p.city || '',
+                    province: p.state || '',
+                    country: p.country || '',
+                    zip: p.zip || ''
+                  }
+                }
+              };
+              if (existing) {
+                await restClient.put(`/customers/${existing.id}.json`, payload);
+              } else {
+                await restClient.post(`/customers.json`, payload);
+              }
+              markHubspotContactProcessed(contactId);
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+      return res.status(200).json({ received: true, processed: true });
+    }
 
     // Check if this is a dealstage change to closedwon and originated from the CRM UI (not our app)
     const fromIntegration = (dealData.changeSource && String(dealData.changeSource).toUpperCase() !== 'CRM_UI');
