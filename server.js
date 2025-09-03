@@ -3501,7 +3501,49 @@ app.get("/orders", async (req, res) => {
       };
     });
 
-    const filtered = transformedOrders.filter(o => !o.deleted);
+    // Fetch tracking details (order_status_url and fulfillments with shipment_status)
+    // only for orders that appear dispatched, to minimise REST calls
+    let restTrackMap = {};
+    try {
+      const dispatchedLegacyIds = transformedOrders
+        .filter(o => o.metafields?.ready_for_dispatch_date_time)
+        .map(o => o.legacy_id)
+        .filter(Boolean);
+
+      if (dispatchedLegacyIds.length) {
+        // Shopify REST supports ids param (comma-separated). If too many, chunk later if needed.
+        const idsParam = dispatchedLegacyIds.join(',');
+        const restForTracking = await restClient.get(`/orders.json?status=any&ids=${idsParam}`);
+        (restForTracking.orders || []).forEach((o) => {
+          restTrackMap[o.id] = {
+            order_status_url: o.order_status_url || null,
+            fulfillments: (o.fulfillments || []).map((f) => ({
+              id: f.id,
+              tracking_company: f.tracking_company || null,
+              tracking_number: f.tracking_number || (Array.isArray(f.tracking_numbers) ? f.tracking_numbers[0] : null),
+              tracking_numbers: Array.isArray(f.tracking_numbers) ? f.tracking_numbers : (f.tracking_number ? [f.tracking_number] : []),
+              tracking_url: f.tracking_url || (Array.isArray(f.tracking_urls) ? f.tracking_urls[0] : null),
+              tracking_urls: Array.isArray(f.tracking_urls) ? f.tracking_urls : (f.tracking_url ? [f.tracking_url] : []),
+              shipment_status: f.shipment_status || null,
+              status: f.status || null,
+            })),
+          };
+        });
+      }
+    } catch (e) {
+      if (LOG_VERBOSE) console.warn('⚠️ Could not fetch tracking details for dispatched orders:', e.message);
+    }
+
+    const mergedOrders = transformedOrders.map((o) => {
+      const track = restTrackMap[o.legacy_id] || {};
+      return {
+        ...o,
+        order_status_url: track.order_status_url || null,
+        fulfillments: track.fulfillments || [],
+      };
+    });
+
+    const filtered = (mergedOrders || transformedOrders).filter(o => !o.deleted);
     const response = {
       orders: filtered,
       count: filtered.length,
