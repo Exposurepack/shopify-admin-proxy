@@ -1511,10 +1511,7 @@ async function createHubSpotDealFromShopifyOrder(order) {
       pipeline: pipelineId,
       dealstage: stageId,
       closedate: Date.now(),
-      deal_currency_code: currency,
-      // Persist Shopify identifiers on the deal to prevent duplicates
-      shopify_order_id: String(order.id),
-      shopify_order_number: String(order.name)
+      deal_currency_code: currency
     };
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
