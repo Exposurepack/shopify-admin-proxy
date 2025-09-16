@@ -1148,6 +1148,20 @@ class HubSpotClient {
     }
   }
 
+  async upsertDealByProperty(idProperty, properties) {
+    try {
+      const url = `${this.baseURL}/crm/v3/objects/deals?idProperty=${encodeURIComponent(idProperty)}`;
+      const resp = await axios.post(url, { properties }, { headers: this.headers });
+      console.log(`✅ Upserted deal by ${idProperty}: ${resp.data.id}`);
+      return resp.data;
+    } catch (error) {
+      const msg = error.response?.data?.message || error.message;
+      console.warn(`⚠️ Upsert by ${idProperty} failed, will fallback to create: ${msg}`);
+      // Fallback to normal create
+      return await this.createDeal(properties);
+    }
+  }
+
   async associateContactWithDeal(contactId, dealId) {
     try {
       console.log(`🔗 Associating contact ${contactId} with deal ${dealId}`);
@@ -1511,7 +1525,17 @@ async function createHubSpotDealFromShopifyOrder(order) {
       pipeline: pipelineId,
       dealstage: stageId,
       closedate: Date.now(),
-      deal_currency_code: currency
+      deal_currency_code: currency,
+      // Source and Shopify identifiers for idempotency
+      deal_source: 'shopify_webhook',
+      shopify_order_id: String(order.id),
+      shopify_order_number: String(order.name),
+      // Financial breakdown for analytics
+      shopify_total_inc_gst: grossAmount,
+      shopify_total_ex_gst: exGstAmount,
+      shopify_gst_amount: calculatedGstAmount,
+      shopify_subtotal: subtotalAmount,
+      shopify_shipping_cost: totalShippingCost
     };
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
@@ -1529,8 +1553,14 @@ async function createHubSpotDealFromShopifyOrder(order) {
       });
     }
 
-    // Create deal in HubSpot
-    const deal = await hubspotClient.createDeal(dealData);
+    // Create or upsert deal in HubSpot by shopify_order_id (prevents duplicates across processes)
+    let deal;
+    try {
+      deal = await hubspotClient.upsertDealByProperty('shopify_order_id', dealData);
+    } catch (e) {
+      console.warn('⚠️ Upsert failed; falling back to create:', e.response?.data?.message || e.message);
+      deal = await hubspotClient.createDeal(dealData);
+    }
 
     // Ensure stage/pipeline are correct in case HubSpot ignored on create
     if (deal?.properties?.dealstage !== stageId || deal?.properties?.pipeline !== pipelineId) {
@@ -1546,17 +1576,27 @@ async function createHubSpotDealFromShopifyOrder(order) {
       }
     }
     console.log(`✅ Created HubSpot deal: ${deal.id} - ${dealData.dealname}`);
-    // Ensure custom Shopify properties are set (if schema exists)
+
+    // Annotate Shopify order with HubSpot deal reference for cross-system idempotency
     try {
-      await axios.patch(
-        `${hubspotClient.baseURL}/crm/v3/objects/deals/${deal.id}`,
-        { properties: {
-          shopify_order_id: String(order.id),
-          shopify_order_number: String(order.name)
-        }},
-        { headers: hubspotClient.headers }
-      );
-    } catch (_) {}
+      const numericOrderId = order.id;
+      const res = await restClient.get(`/orders/${numericOrderId}.json?fields=id,tags,note_attributes`);
+      const currentTags = String(res?.order?.tags || '');
+      const tagSet = new Set(currentTags.split(',').map(t => t.trim()).filter(Boolean));
+      ['hubspot', 'hubspot-linked', `hubspot-deal-${deal.id}`].forEach(t => tagSet.add(t));
+      const updatedTags = Array.from(tagSet).join(', ');
+
+      const existingNotes = Array.isArray(res?.order?.note_attributes) ? res.order.note_attributes : [];
+      const hasNote = existingNotes.some(na => String(na.name).toLowerCase() === 'hubspot_deal_id');
+      const updatedNotes = hasNote
+        ? existingNotes.map(na => (String(na.name).toLowerCase() === 'hubspot_deal_id' ? { name: 'hubspot_deal_id', value: String(deal.id) } : na))
+        : existingNotes.concat([{ name: 'hubspot_deal_id', value: String(deal.id) }]);
+
+      await restClient.put(`/orders/${numericOrderId}.json`, { order: { id: numericOrderId, tags: updatedTags, note_attributes: updatedNotes }});
+      console.log(`✅ Annotated Shopify order ${order.name} with HubSpot deal ID ${deal.id}`);
+    } catch (annotateErr) {
+      console.warn(`⚠️ Could not annotate Shopify order with HubSpot deal ID:`, annotateErr?.response?.data || annotateErr.message);
+    }
 
     // Associate contact with deal if both exist
     if (!contact) {
