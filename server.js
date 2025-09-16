@@ -3891,6 +3891,151 @@ app.put("/orders/:id/shipping-address", authenticate, async (req, res) => {
   }
 });
 
+/**
+ * Split an order into multiple new orders by supplier.
+ * Expects body: { supplierAssignments: { PCW: number[], SLP: number[], SP: number[], GWP: number[] }, sharedLineItemIds?: number[] }
+ * Returns: { created: [{ id, name, supplier }], skippedSuppliers: string[] }
+ */
+app.post("/orders/:id/split", authenticate, async (req, res) => {
+  try {
+    const originalIdRaw = String(req.params.id || '').trim();
+    const originalId = originalIdRaw.replace(/\D/g, '');
+    if (!originalId) {
+      return res.status(400).json({ error: "Invalid order id" });
+    }
+
+    const SUPPLIERS = ["PCW", "SLP", "SP", "GWP"];
+    const body = req.body || {};
+    const supplierAssignments = body.supplierAssignments || {};
+    const explicitSharedIds = Array.isArray(body.sharedLineItemIds) ? new Set(body.sharedLineItemIds.map(Number)) : null;
+
+    // Fetch original order (ensure we have line items and customer/email/addresses)
+    const originalRes = await restClient.get(`/orders/${originalId}.json?status=any`);
+    const originalOrder = originalRes?.order;
+    if (!originalOrder) {
+      return res.status(404).json({ error: "Original order not found" });
+    }
+
+    const lineItems = Array.isArray(originalOrder.line_items) ? originalOrder.line_items : [];
+
+    // Detect shared items: titles including "Shipping" or "Rushed" (case-insensitive)
+    const isSharedItem = (item) => {
+      const title = String(item.title || item.name || '').toLowerCase();
+      if (explicitSharedIds) return explicitSharedIds.has(Number(item.id));
+      return title.includes('shipping') || title.includes('rushed');
+    };
+
+    const sharedItems = lineItems.filter(isSharedItem);
+
+    // Helper to convert an original line item to a create payload
+    const toCreateLineItem = (item) => {
+      const qty = Number(item.quantity || 1);
+      // Prefer variant_id when available; fall back to custom line item
+      if (item.variant_id) {
+        const li = { variant_id: item.variant_id, quantity: qty };
+        // If original had custom properties, copy them
+        if (item.properties && Array.isArray(item.properties) ? item.properties.length > 0 : Object.keys(item.properties || {}).length > 0) {
+          li.properties = item.properties;
+        }
+        return li;
+      }
+      const price = item.price || item.original_price || item.line_price || null;
+      const title = item.title || item.name || 'Custom Item';
+      const li = { title, quantity: qty };
+      if (price != null) li.price = String(price);
+      return li;
+    };
+
+    const created = [];
+    const skippedSuppliers = [];
+
+    // Build base order fields copied from original
+    const baseOrder = {
+      email: originalOrder.email || undefined,
+      customer: originalOrder.customer?.id ? { id: originalOrder.customer.id } : undefined,
+      billing_address: originalOrder.billing_address || undefined,
+      shipping_address: originalOrder.shipping_address || undefined,
+      send_receipt: false,
+      send_fulfillment_receipt: false,
+      inventory_behaviour: 'decrement_obeying_policy'
+    };
+
+    // Tags and note_attributes with linkage back to original
+    const originalTags = String(originalOrder.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    const originalNotes = Array.isArray(originalOrder.note_attributes) ? originalOrder.note_attributes : [];
+
+    for (const supplier of SUPPLIERS) {
+      const idsForSupplier = (supplierAssignments[supplier] || []).map(Number);
+      if (!idsForSupplier.length) {
+        skippedSuppliers.push(supplier);
+        continue;
+      }
+
+      // Collect assigned items for this supplier
+      const assignedItems = lineItems.filter(li => idsForSupplier.includes(Number(li.id)));
+      if (!assignedItems.length) {
+        skippedSuppliers.push(supplier);
+        continue;
+      }
+
+      // Build line_items: assigned + shared
+      const liPayload = [];
+      assignedItems.forEach(item => liPayload.push(toCreateLineItem(item)));
+      sharedItems.forEach(item => liPayload.push(toCreateLineItem(item)));
+
+      // Ensure at least one line item
+      if (liPayload.length === 0) {
+        skippedSuppliers.push(supplier);
+        continue;
+      }
+
+      const orderData = {
+        order: {
+          ...baseOrder,
+          line_items: liPayload,
+          tags: Array.from(new Set([...originalTags, `split-from-${originalId}`, `supplier:${supplier}`])).join(', '),
+          note_attributes: [
+            ...originalNotes,
+            { name: 'split_origin_order_id', value: String(originalId) },
+            { name: 'supplier', value: supplier }
+          ]
+        }
+      };
+
+      try {
+        const response = await restClient.post('/orders.json', orderData);
+        const newOrder = response?.order;
+        if (newOrder?.id) {
+          // Add metafield link back to original
+          const newOrderGID = `gid://shopify/Order/${newOrder.id}`;
+          try {
+            await metafieldManager.setMetafield(
+              newOrderGID,
+              'custom',
+              'split_origin_order_id',
+              String(originalId),
+              'single_line_text_field'
+            );
+          } catch (e) {
+            console.warn('Failed to set split_origin_order_id metafield:', e.message);
+          }
+          created.push({ id: newOrder.id, name: newOrder.name, supplier });
+        } else {
+          skippedSuppliers.push(supplier);
+        }
+      } catch (e) {
+        console.error(`Split order creation failed for ${supplier}:`, e.response?.data || e.message);
+        skippedSuppliers.push(supplier);
+      }
+    }
+
+    return res.json({ created, skippedSuppliers });
+  } catch (err) {
+    console.error('Order split error:', err);
+    return res.status(500).json({ error: err.message || 'Order split failed' });
+  }
+});
+
 // Fetch a single customer by ID (returns tags among other fields)
 app.get("/rest/customers/:id", async (req, res) => {
   try {
