@@ -3952,9 +3952,20 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
     };
     const sharedLineItems = includeShared ? allLineItems.filter(li => isSharedTitle(li.title)) : [];
 
+    // Normalise incoming allocations to REST numeric line_item IDs
+    const normalisedAllocations = Object.fromEntries(
+      Object.entries(allocations).map(([supplier, ids]) => {
+        const arr = Array.isArray(ids) ? ids : [];
+        const numericIds = arr
+          .map((val) => String(val).replace(/\D+/g, ""))
+          .filter(Boolean);
+        return [supplier, numericIds];
+      })
+    );
+
     // Guard against duplicate allocation of the same line item across suppliers (excluding shared)
     const allocatedSet = new Set();
-    for (const [supplier, ids] of Object.entries(allocations)) {
+    for (const [supplier, ids] of Object.entries(normalisedAllocations)) {
       if (!Array.isArray(ids)) continue;
       for (const lineItemId of ids) {
         if (allocatedSet.has(lineItemId)) {
@@ -3980,14 +3991,14 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
 
     // Build and create new orders per supplier
     const created = [];
-    const supplierKeys = Object.keys(allocations).filter(k => Array.isArray(allocations[k]) && allocations[k].length > 0);
+    const supplierKeys = Object.keys(normalisedAllocations).filter(k => Array.isArray(normalisedAllocations[k]) && normalisedAllocations[k].length > 0);
 
     if (supplierKeys.length === 0) {
       return res.status(400).json({ error: "No supplier allocations provided" });
     }
 
     for (const supplier of supplierKeys) {
-      const targetIds = new Set(allocations[supplier].map(String));
+      const targetIds = new Set(normalisedAllocations[supplier].map(String));
       const supplierItems = allLineItems.filter(li => targetIds.has(String(li.id)));
 
       // Merge supplier-specific items with shared items (dedupe by original line item id)
@@ -4015,7 +4026,8 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
       const tags = Array.from(new Set([
         ...originalTags,
         `split-from-${originalOrder.id}`,
-        `supplier-${supplier}`
+        `supplier-${supplier}`,
+        supplier.toUpperCase()
       ]));
 
       const note_attributes = [
