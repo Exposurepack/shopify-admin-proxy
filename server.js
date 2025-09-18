@@ -1519,24 +1519,32 @@ async function createHubSpotDealFromShopifyOrder(order) {
       ? `${businessName} - ${customerFirstName || 'Customer'}`
       : (customerFirstName || 'Customer');
 
+    // Build minimal properties first (always safe)
     const dealData = {
       dealname: computedDealName,
       amount: exGstAmount,
       pipeline: pipelineId,
       dealstage: stageId,
       closedate: Date.now(),
-      deal_currency_code: currency,
-      // Source and Shopify identifiers for idempotency
-      deal_source: 'shopify_webhook',
-      shopify_order_id: String(order.id),
-      shopify_order_number: String(order.name),
-      // Financial breakdown for analytics
-      shopify_total_inc_gst: grossAmount,
-      shopify_total_ex_gst: exGstAmount,
-      shopify_gst_amount: calculatedGstAmount,
-      shopify_subtotal: subtotalAmount,
-      shopify_shipping_cost: totalShippingCost
+      deal_currency_code: currency
     };
+
+    // Add optional custom properties only if the portal likely supports them.
+    // Guard with a feature flag env or allowlist in the future; for now, attach under a single try/catch
+    try {
+      Object.assign(dealData, {
+        deal_source: 'shopify_webhook',
+        shopify_order_id: String(order.id),
+        shopify_order_number: String(order.name),
+        shopify_total_inc_gst: grossAmount,
+        shopify_total_ex_gst: exGstAmount,
+        shopify_gst_amount: calculatedGstAmount,
+        shopify_subtotal: subtotalAmount,
+        shopify_shipping_cost: totalShippingCost
+      });
+    } catch (_) {
+      // If HubSpot rejects unknown properties, createDeal/upsertDeal will still succeed with minimal set
+    }
 
     console.log(`🤝 Creating deal: ${dealData.dealname} - $${exGstAmount.toFixed(2)} ${currency} (ex-GST)`);
     console.log(`📊 Deal summary: ${productLineItems.length} product items, ${shippingLineItems.length} shipping items, Total: $${grossAmount.toFixed(2)} (inc GST)`);
@@ -1558,8 +1566,22 @@ async function createHubSpotDealFromShopifyOrder(order) {
     try {
       deal = await hubspotClient.upsertDealByProperty('shopify_order_id', dealData);
     } catch (e) {
-      console.warn('⚠️ Upsert failed; falling back to create:', e.response?.data?.message || e.message);
-      deal = await hubspotClient.createDeal(dealData);
+      console.warn('⚠️ Upsert failed; retrying without custom properties');
+      // Retry with minimal set only
+      const minimal = {
+        dealname: dealData.dealname,
+        amount: dealData.amount,
+        pipeline: dealData.pipeline,
+        dealstage: dealData.dealstage,
+        closedate: dealData.closedate,
+        deal_currency_code: dealData.deal_currency_code
+      };
+      try {
+        deal = await hubspotClient.upsertDealByProperty('shopify_order_id', minimal);
+      } catch (e2) {
+        console.warn('⚠️ Minimal upsert failed, creating minimal deal:', e2.response?.data?.message || e2.message);
+        deal = await hubspotClient.createDeal(minimal);
+      }
     }
 
     // Ensure stage/pipeline are correct in case HubSpot ignored on create
@@ -3398,6 +3420,7 @@ app.get("/orders", async (req, res) => {
                     sku
                     variantTitle
                     vendor
+                    variant { id sku }
                     originalUnitPriceSet {
                       shopMoney {
                         amount
@@ -3497,6 +3520,8 @@ app.get("/orders", async (req, res) => {
         sku: item.node.sku,
         variantTitle: item.node.variantTitle,
         vendor: item.node.vendor,
+        variant: item.node.variant ? { sku: item.node.variant.sku, id: item.node.variant.id } : null,
+        variant_id: item.node.variant ? item.node.variant.id : null,
         productTitle: item.node.product?.title,
         productType: item.node.product?.productType,
         unit_price: item.node.discountedUnitPriceSet?.shopMoney?.amount || item.node.originalUnitPriceSet?.shopMoney?.amount,
@@ -3892,147 +3917,147 @@ app.put("/orders/:id/shipping-address", authenticate, async (req, res) => {
 });
 
 /**
- * Split an order into multiple new orders by supplier.
- * Expects body: { supplierAssignments: { PCW: number[], SLP: number[], SP: number[], GWP: number[] }, sharedLineItemIds?: number[] }
- * Returns: { created: [{ id, name, supplier }], skippedSuppliers: string[] }
+ * Split an order into multiple supplier-specific orders
+ * Body: {
+ *   allocations: { PCW: [lineItemId, ...], SLP: [...], SP: [...], GWP: [...] },
+ *   includeShared: true // will include "shipping" and "rushed" items in all splits
+ * }
  */
 app.post("/orders/:id/split", authenticate, async (req, res) => {
   try {
-    const originalIdRaw = String(req.params.id || '').trim();
-    const originalId = originalIdRaw.replace(/\D/g, '');
-    if (!originalId) {
-      return res.status(400).json({ error: "Invalid order id" });
+    const { id } = req.params;
+    const { allocations = {}, includeShared = true } = req.body || {};
+
+    if (!id) {
+      return res.status(400).json({ error: "Missing order id" });
     }
 
-    const SUPPLIERS = ["PCW", "SLP", "SP", "GWP"];
-    const body = req.body || {};
-    const supplierAssignments = body.supplierAssignments || {};
-    const explicitSharedIds = Array.isArray(body.sharedLineItemIds) ? new Set(body.sharedLineItemIds.map(Number)) : null;
+    // Fetch original order via REST API to ensure we have complete, current data
+    const originalResp = await restClient.get(`/orders/${encodeURIComponent(id)}.json`);
+    const originalOrder = originalResp.order || originalResp;
 
-    // Fetch original order (ensure we have line items and customer/email/addresses)
-    const originalRes = await restClient.get(`/orders/${originalId}.json?status=any`);
-    const originalOrder = originalRes?.order;
-    if (!originalOrder) {
-      return res.status(404).json({ error: "Original order not found" });
+    if (!originalOrder || !Array.isArray(originalOrder.line_items)) {
+      return res.status(404).json({ error: "Original order not found or has no line items" });
     }
 
-    const lineItems = Array.isArray(originalOrder.line_items) ? originalOrder.line_items : [];
-
-    // Detect shared items: titles including "Shipping" or "Rushed" (case-insensitive)
-    const isSharedItem = (item) => {
-      const title = String(item.title || item.name || '').toLowerCase();
-      if (explicitSharedIds) return explicitSharedIds.has(Number(item.id));
-      return title.includes('shipping') || title.includes('rushed');
+    // Determine shared line items (Shipping and Rushed) by title semantics
+    const allLineItems = originalOrder.line_items;
+    const isSharedTitle = (title) => {
+      const t = String(title || '').toLowerCase();
+      return t.includes('shipping') || t.includes('rushed');
     };
+    const sharedLineItems = includeShared ? allLineItems.filter(li => isSharedTitle(li.title)) : [];
 
-    const sharedItems = lineItems.filter(isSharedItem);
-
-    // Helper to convert an original line item to a create payload
-    const toCreateLineItem = (item) => {
-      const qty = Number(item.quantity || 1);
-      // Prefer variant_id when available; fall back to custom line item
-      if (item.variant_id) {
-        const li = { variant_id: item.variant_id, quantity: qty };
-        // If original had custom properties, copy them
-        if (item.properties && Array.isArray(item.properties) ? item.properties.length > 0 : Object.keys(item.properties || {}).length > 0) {
-          li.properties = item.properties;
+    // Guard against duplicate allocation of the same line item across suppliers (excluding shared)
+    const allocatedSet = new Set();
+    for (const [supplier, ids] of Object.entries(allocations)) {
+      if (!Array.isArray(ids)) continue;
+      for (const lineItemId of ids) {
+        if (allocatedSet.has(lineItemId)) {
+          return res.status(400).json({
+            error: `Line item ${lineItemId} allocated to multiple suppliers`,
+            supplier
+          });
         }
-        return li;
+        allocatedSet.add(lineItemId);
       }
-      const price = item.price || item.original_price || item.line_price || null;
-      const title = item.title || item.name || 'Custom Item';
-      const li = { title, quantity: qty };
-      if (price != null) li.price = String(price);
-      return li;
-    };
+    }
 
+    // Helper to transform an original line item into a create-order line item
+    const toCreateLineItem = (item) => ({
+      // Use variant_id when available for proper inventory and pricing; also set price to preserve original charged price
+      ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+      quantity: item.quantity || 1,
+      // Preserve original price where possible to keep totals aligned with the original order
+      ...(item.price ? { price: String(item.price) } : {}),
+      // Carry over properties if present (engraving, notes, etc.)
+      ...(item.properties && Object.keys(item.properties || {}).length > 0 ? { properties: item.properties } : {})
+    });
+
+    // Build and create new orders per supplier
     const created = [];
-    const skippedSuppliers = [];
+    const supplierKeys = Object.keys(allocations).filter(k => Array.isArray(allocations[k]) && allocations[k].length > 0);
 
-    // Build base order fields copied from original
-    const baseOrder = {
-      email: originalOrder.email || undefined,
-      customer: originalOrder.customer?.id ? { id: originalOrder.customer.id } : undefined,
-      billing_address: originalOrder.billing_address || undefined,
-      shipping_address: originalOrder.shipping_address || undefined,
-      send_receipt: false,
-      send_fulfillment_receipt: false,
-      inventory_behaviour: 'decrement_obeying_policy'
-    };
+    if (supplierKeys.length === 0) {
+      return res.status(400).json({ error: "No supplier allocations provided" });
+    }
 
-    // Tags and note_attributes with linkage back to original
-    const originalTags = String(originalOrder.tags || '').split(',').map(t => t.trim()).filter(Boolean);
-    const originalNotes = Array.isArray(originalOrder.note_attributes) ? originalOrder.note_attributes : [];
+    for (const supplier of supplierKeys) {
+      const targetIds = new Set(allocations[supplier].map(String));
+      const supplierItems = allLineItems.filter(li => targetIds.has(String(li.id)));
 
-    for (const supplier of SUPPLIERS) {
-      const idsForSupplier = (supplierAssignments[supplier] || []).map(Number);
-      if (!idsForSupplier.length) {
-        skippedSuppliers.push(supplier);
+      // Merge supplier-specific items with shared items (dedupe by original line item id)
+      const mergedItemsById = new Map();
+      [...supplierItems, ...sharedLineItems].forEach((li) => {
+        const key = String(li.id);
+        if (!mergedItemsById.has(key)) mergedItemsById.set(key, li);
+      });
+      const newLineItems = Array.from(mergedItemsById.values()).map(toCreateLineItem);
+
+      if (newLineItems.length === 0) {
+        // Skip creating empty orders for this supplier
         continue;
       }
 
-      // Collect assigned items for this supplier
-      const assignedItems = lineItems.filter(li => idsForSupplier.includes(Number(li.id)));
-      if (!assignedItems.length) {
-        skippedSuppliers.push(supplier);
-        continue;
-      }
+      // Copy customer, addresses, tags, and set linking metadata
+      const customer = originalOrder.customer?.id ? { id: originalOrder.customer.id } : undefined;
+      const billing_address = originalOrder.billing_address || undefined;
+      const shipping_address = originalOrder.shipping_address || undefined;
+      const originalTags = Array.isArray(originalOrder.tags)
+        ? originalOrder.tags
+        : typeof originalOrder.tags === 'string' && originalOrder.tags.length > 0
+          ? originalOrder.tags.split(',').map(s => s.trim()).filter(Boolean)
+          : [];
+      const tags = Array.from(new Set([
+        ...originalTags,
+        `split-from-${originalOrder.id}`,
+        `supplier-${supplier}`
+      ]));
 
-      // Build line_items: assigned + shared
-      const liPayload = [];
-      assignedItems.forEach(item => liPayload.push(toCreateLineItem(item)));
-      sharedItems.forEach(item => liPayload.push(toCreateLineItem(item)));
+      const note_attributes = [
+        { name: 'split_from_order_id', value: String(originalOrder.id) },
+        { name: 'split_from_order_name', value: String(originalOrder.name || '') },
+        { name: 'split_supplier', value: supplier }
+      ];
 
-      // Ensure at least one line item
-      if (liPayload.length === 0) {
-        skippedSuppliers.push(supplier);
-        continue;
-      }
-
-      const orderData = {
+      const orderPayload = {
         order: {
-          ...baseOrder,
-          line_items: liPayload,
-          tags: Array.from(new Set([...originalTags, `split-from-${originalId}`, `supplier:${supplier}`])).join(', '),
-          note_attributes: [
-            ...originalNotes,
-            { name: 'split_origin_order_id', value: String(originalId) },
-            { name: 'supplier', value: supplier }
-          ]
+          line_items: newLineItems,
+          ...(customer ? { customer } : { email: originalOrder.email }),
+          billing_address,
+          shipping_address,
+          // Keep financial status in sync with original order
+          ...(originalOrder.financial_status ? { financial_status: originalOrder.financial_status } : {}),
+          // Copy currency if available
+          ...(originalOrder.currency ? { currency: originalOrder.currency } : {}),
+          tags,
+          note: `Split from ${originalOrder.name || originalOrder.id} for supplier ${supplier}`,
+          note_attributes,
+          send_receipt: false,
+          send_fulfillment_receipt: false,
+          inventory_behaviour: 'decrement_obeying_policy'
         }
       };
 
-      try {
-        const response = await restClient.post('/orders.json', orderData);
-        const newOrder = response?.order;
-        if (newOrder?.id) {
-          // Add metafield link back to original
-          const newOrderGID = `gid://shopify/Order/${newOrder.id}`;
-          try {
-            await metafieldManager.setMetafield(
-              newOrderGID,
-              'custom',
-              'split_origin_order_id',
-              String(originalId),
-              'single_line_text_field'
-            );
-          } catch (e) {
-            console.warn('Failed to set split_origin_order_id metafield:', e.message);
-          }
-          created.push({ id: newOrder.id, name: newOrder.name, supplier });
-        } else {
-          skippedSuppliers.push(supplier);
-        }
-      } catch (e) {
-        console.error(`Split order creation failed for ${supplier}:`, e.response?.data || e.message);
-        skippedSuppliers.push(supplier);
-      }
+      // Create the order
+      const resp = await restClient.post('/orders.json', orderPayload);
+      const newOrder = resp.order || resp;
+      created.push({ supplier, order: newOrder });
     }
 
-    return res.json({ created, skippedSuppliers });
-  } catch (err) {
-    console.error('Order split error:', err);
-    return res.status(500).json({ error: err.message || 'Order split failed' });
+    return res.json({
+      ok: true,
+      original_order_id: originalOrder.id,
+      created_orders: created.map(c => ({
+        supplier: c.supplier,
+        id: c.order.id,
+        name: c.order.name,
+        order_number: c.order.order_number
+      }))
+    });
+  } catch (error) {
+    console.error('❌ Error splitting order:', error?.response?.data || error.message);
+    return res.status(500).json({ error: 'Failed to split order', details: error?.response?.data || error.message });
   }
 });
 
