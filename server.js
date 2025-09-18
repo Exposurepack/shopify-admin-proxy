@@ -3415,6 +3415,7 @@ app.get("/orders", async (req, res) => {
               lineItems(first: 10) {
                 edges {
                   node {
+                    id
                     title
                     quantity
                     sku
@@ -3515,6 +3516,7 @@ app.get("/orders", async (req, res) => {
       const noteAttributes = restOrdersMap[node.legacyResourceId] || {};
 
       const lineItems = node.lineItems.edges.map((item) => ({
+        id: item.node.id,
         title: item.node.title,
         quantity: item.node.quantity,
         sku: item.node.sku,
@@ -4797,6 +4799,22 @@ app.post("/shopify-webhook", async (req, res) => {
         orderId: order.id,
         orderNumber: order.name
       });
+    }
+
+    // Guard: Skip creating deals for split child orders (created by our /orders/:id/split)
+    const hasSplitTag = tagsLower.includes('split-from-') || tagsLower.includes('supplier-');
+    const isSplitChild = Array.isArray(order.note_attributes) && order.note_attributes.some(na => {
+      const name = String(na?.name ?? '').toLowerCase();
+      return name === 'split_from_order_id' || name === 'split_supplier';
+    });
+    if (hasSplitTag || isSplitChild) {
+      console.log('🛑 Skipping HubSpot deal creation for split child order:', {
+        orderId: order.id,
+        orderNumber: order.name,
+        tags: tagsValue
+      });
+      markOrderProcessed(order.id);
+      return res.status(200).json({ received: true, processed: false, message: 'Skipped split child order' });
     }
 
     // Extra guard: if a HubSpot deal already exists for this Shopify order, skip creating another
