@@ -589,6 +589,13 @@ class FileUploadManager {
 /**
  * HubSpot API client for deal and contact management
  */
+// Deal-scoped logging helper to optionally quiet noisy logs for specific deals
+const QUIET_DEALS = new Set(['43595435165']);
+function dealScopedLog(dealId, ...args) {
+  if (QUIET_DEALS.has(String(dealId))) return;
+  console.log(...args);
+}
+
 class HubSpotClient {
   constructor() {
     if (!HUBSPOT_PRIVATE_APP_TOKEN) {
@@ -776,7 +783,7 @@ class HubSpotClient {
 
   async getDealInvoices(dealId) {
     try {
-      console.log(`🔍 Fetching invoices for deal ${dealId}...`);
+      dealScopedLog(dealId, `🔍 Fetching invoices for deal ${dealId}...`);
       // First, get invoices associated with the deal
       const response = await axios.get(
         `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/invoices`,
@@ -786,17 +793,17 @@ class HubSpotClient {
         }
       );
       
-      console.log(`📊 Invoice association response:`, JSON.stringify(response.data, null, 2));
+      dealScopedLog(dealId, `📊 Invoice association response:`, JSON.stringify(response.data, null, 2));
       
       if (!response.data.results || response.data.results.length === 0) {
-        console.log(`ℹ️ No invoices found for deal ${dealId} - falling back to deal line items`);
+        dealScopedLog(dealId, `ℹ️ No invoices found for deal ${dealId} - falling back to deal line items`);
         const fallbackItems = await this.getDealLineItems(dealId);
         return Array.isArray(fallbackItems) ? fallbackItems : [];
       }
 
       // Get the most recent invoice (or first one)
       const invoiceId = response.data.results[0].id;
-      console.log(`📄 Processing invoice ID: ${invoiceId}`);
+      dealScopedLog(dealId, `📄 Processing invoice ID: ${invoiceId}`);
       
       // Fetch ALL invoice properties to see what's actually available
       const invoiceResponse = await axios.get(
@@ -827,7 +834,7 @@ class HubSpotClient {
         }
       );
       
-      console.log(`📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
+      dealScopedLog(dealId, `📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
 
       let invoice = invoiceResponse.data;
 
@@ -838,7 +845,7 @@ class HubSpotClient {
 
       if (!hasAddressLikeKey(invoice.properties)) {
         try {
-          console.log(`🔎 No address-like keys on invoice. Discovering invoice properties...`);
+          dealScopedLog(dealId, `🔎 No address-like keys on invoice. Discovering invoice properties...`);
           const propsDef = await axios.get(`${this.baseURL}/crm/v3/properties/invoices`, { headers: this.headers });
           const allNames = (propsDef.data?.results || []).map(p => p.name);
           const wanted = allNames.filter(n => /address|address1|address_1|street|city|state|province|region|zip|postcode|postal|ship|bill|delivery|hs_tax_amount|hs_total_amount|hs_subtotal_amount|hs_discount_amount|hs_invoice_number|hs_currency/i.test(n));
@@ -851,10 +858,10 @@ class HubSpotClient {
               }
             );
             invoice = refetch.data;
-            console.log(`🔁 Refetched invoice with ${wanted.length} properties (dynamic)`);
+            dealScopedLog(dealId, `🔁 Refetched invoice with ${wanted.length} properties (dynamic)`);
           }
         } catch (discErr) {
-          console.log(`ℹ️ Invoice property discovery failed:`, discErr.message);
+          dealScopedLog(dealId, `ℹ️ Invoice property discovery failed: ${discErr.message}`);
         }
       }
       
@@ -868,7 +875,7 @@ class HubSpotClient {
       );
 
       if (!lineItemsResponse.data.results || lineItemsResponse.data.results.length === 0) {
-        console.log(`ℹ️ No line items found for invoice ${invoiceId}`);
+        dealScopedLog(dealId, `ℹ️ No line items found for invoice ${invoiceId}`);
         return [];
       }
 
@@ -896,10 +903,10 @@ class HubSpotClient {
 
       const lineItems = await Promise.all(lineItemPromises);
       
-      console.log(`✅ Found invoice ${invoice.properties.hs_invoice_number || invoiceId} with ${lineItems.length} line items`);
-      console.log(`💰 Invoice totals - Subtotal: $${invoice.properties.hs_subtotal_amount || 'N/A'}, Tax: $${invoice.properties.hs_tax_amount || 'N/A'}, Total: $${invoice.properties.hs_total_amount || 'N/A'}`);
-      console.log(`🔍 All invoice properties:`, Object.keys(invoice.properties || {}));
-      console.log(`🔍 Tax-related properties:`, {
+      dealScopedLog(dealId, `✅ Found invoice ${invoice.properties.hs_invoice_number || invoiceId} with ${lineItems.length} line items`);
+      dealScopedLog(dealId, `💰 Invoice totals - Subtotal: $${invoice.properties.hs_subtotal_amount || 'N/A'}, Tax: $${invoice.properties.hs_tax_amount || 'N/A'}, Total: $${invoice.properties.hs_total_amount || 'N/A'}`);
+      dealScopedLog(dealId, `🔍 All invoice properties:`, Object.keys(invoice.properties || {}));
+      dealScopedLog(dealId, `🔍 Tax-related properties:`, {
         hs_tax_amount: invoice.properties.hs_tax_amount,
         hs_subtotal_amount: invoice.properties.hs_subtotal_amount,
         hs_total_amount: invoice.properties.hs_total_amount
@@ -925,7 +932,7 @@ class HubSpotClient {
         calculatedTotal = calculatedSubtotal + calculatedTax;
       }
       
-      console.log(`🧮 Calculated totals - Subtotal: $${calculatedSubtotal}, Tax: $${calculatedTax}, Total: $${calculatedTotal}`);
+      dealScopedLog(dealId, `🧮 Calculated totals - Subtotal: $${calculatedSubtotal}, Tax: $${calculatedTax}, Total: $${calculatedTotal}`);
       
       // Use calculated values if invoice properties are missing
       const subtotal = parseFloat(invoice.properties.hs_subtotal_amount) || calculatedSubtotal;
@@ -1723,7 +1730,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     throw new Error("HubSpot integration not configured - missing HUBSPOT_PRIVATE_APP_TOKEN");
   }
 
-  console.log(`🔄 Creating Shopify order from HubSpot deal: ${dealId}`);
+  dealScopedLog(dealId, `🔄 Creating Shopify order from HubSpot deal: ${dealId}`);
 
   try {
     // Idempotency and duplicate checks
@@ -1754,15 +1761,15 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
           }
         }
       );
-      console.log(`🔗 All deal associations:`, JSON.stringify(allAssociationsResponse.data.associations || {}, null, 2));
+      dealScopedLog(dealId, `🔗 All deal associations:`, JSON.stringify(allAssociationsResponse.data.associations || {}, null, 2));
     } catch (error) {
-      console.log(`⚠️ Could not fetch deal associations:`, error.response?.data?.message || error.message);
+      dealScopedLog(dealId, `⚠️ Could not fetch deal associations: ${error.response?.data?.message || error.message}`);
     }
     
     const invoiceData = await hubspotClient.getDealInvoices(dealId);
 
-    console.log(`📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
-    console.log(`👥 Associated contacts: ${contacts.length}`);
+    dealScopedLog(dealId, `📋 Deal: ${deal.properties.dealname || 'Unnamed Deal'} - $${deal.properties.amount || '0'}`);
+    dealScopedLog(dealId, `👥 Associated contacts: ${contacts.length}`);
     
     // Handle both old format (array) and new format (object with lineItems and invoice)
     let invoiceLineItems = [];
@@ -1771,15 +1778,15 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     if (Array.isArray(invoiceData)) {
       // Old format - just line items
       invoiceLineItems = invoiceData;
-      console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
+      dealScopedLog(dealId, `🧾 Invoice line items: ${invoiceLineItems.length}`);
     } else if (invoiceData && invoiceData.lineItems) {
       // New format - line items with invoice totals
       invoiceLineItems = invoiceData.lineItems;
       invoiceInfo = invoiceData.invoice;
-      console.log(`🧾 Invoice line items: ${invoiceLineItems.length}`);
-      console.log(`💰 Invoice info: ${invoiceInfo.number} - Subtotal: $${invoiceInfo.subtotal}, Tax: $${invoiceInfo.tax}, Total: $${invoiceInfo.total}`);
+      dealScopedLog(dealId, `🧾 Invoice line items: ${invoiceLineItems.length}`);
+      dealScopedLog(dealId, `💰 Invoice info: ${invoiceInfo.number} - Subtotal: $${invoiceInfo.subtotal}, Tax: $${invoiceInfo.tax}, Total: $${invoiceInfo.total}`);
     } else {
-      console.log(`🧾 No invoice data found`);
+      dealScopedLog(dealId, `🧾 No invoice data found`);
     }
 
     // Get primary contact (first one)
@@ -1789,7 +1796,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     }
 
     const contactProps = primaryContact.properties;
-    console.log(`👤 Primary contact: ${contactProps.email || 'No email'}`);
+    dealScopedLog(dealId, `👤 Primary contact: ${contactProps.email || 'No email'}`);
 
     // Transform invoice line items for Shopify
     // Use total amount as price with quantity 1 to avoid decimal rounding issues
@@ -1812,7 +1819,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         fulfillment_service: 'manual'
       };
       
-      console.log(`🔄 Transformed: "${props.name}" | HubSpot: ${originalQuantity} × $${unitPrice} = $${totalAmount} | Shopify: 1 × $${totalAmount.toFixed(2)}`);
+      dealScopedLog(dealId, `🔄 Transformed: "${props.name}" | HubSpot: ${originalQuantity} × $${unitPrice} = $${totalAmount} | Shopify: 1 × $${totalAmount.toFixed(2)}`);
       return transformedItem;
     });
 
@@ -1898,7 +1905,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     }
 
     // Extract address information from multiple sources
-    console.log(`🏠 Extracting address information...`);
+    dealScopedLog(dealId, `🏠 Extracting address information...`);
     
     // Debug: Log all available invoice properties to see what address fields exist
     // Suppress verbose invoice property dumps
@@ -1906,7 +1913,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     // Helper function to extract address from deal properties
     const getDealAddress = (type = 'shipping') => {
       const props = deal.properties;
-      console.log(`🏢 Looking for ${type} address in deal properties:`, Object.keys(props));
+      dealScopedLog(dealId, `🏢 Looking for ${type} address in deal properties:`, Object.keys(props));
       
       // Common deal address field patterns
       const addressFields = {
@@ -1937,7 +1944,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       
       // Only return if we have at least address1 or city
       if (addressData.address1 || addressData.city) {
-        console.log(`🏢 Found ${type} address in deal:`, addressData);
+        dealScopedLog(dealId, `🏢 Found ${type} address in deal:`, addressData);
         return {
           first_name: firstName,
           last_name: lastName,
@@ -1975,7 +1982,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
                     contactProps.zipcode || contactProps.mailing_zip || 
                     contactProps.billing_zip || contactProps.shipping_zip || '';
         
-        console.log(`👤 Contact address extraction - address1: "${address1}", city: "${city}", state: "${state}", zip: "${zip}"`);
+        dealScopedLog(dealId, `👤 Contact address extraction - address1: "${address1}", city: "${city}", state: "${state}", zip: "${zip}"`);
         
         return {
           first_name: firstName,
@@ -1995,7 +2002,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       if (!invoiceInfo || !invoiceInfo.properties) return null;
       
       const props = invoiceInfo.properties;
-      console.log(`🏠 Looking for ${type} address in invoice properties:`, Object.keys(props));
+      dealScopedLog(dealId, `🏠 Looking for ${type} address in invoice properties:`, Object.keys(props));
       
       // Common HubSpot invoice address field patterns
       const addressFields = {
@@ -2107,7 +2114,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
           }
         }
       } catch (quoteErr) {
-        console.log(`ℹ️ Quote-based address extraction not available:`, quoteErr.message);
+        dealScopedLog(dealId, `ℹ️ Quote-based address extraction not available: ${quoteErr.message}`);
       }
     }
     const contactAddress = getContactAddress();
@@ -2141,13 +2148,13 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       console.log(`ℹ️ Company address fallback not available:`, e.message);
     }
     
-    console.log(`🏠 Address extraction results:`);
-    console.log(`   🏢 Deal shipping:`, dealShippingAddress);
-    console.log(`   🏢 Deal billing:`, dealBillingAddress);
-    console.log(`   📦 Invoice shipping:`, invoiceShippingAddress);
-    console.log(`   💰 Invoice billing:`, invoiceBillingAddress);
-    console.log(`   👤 Contact address:`, contactAddress);
-    console.log(`   🏢 Company address:`, companyAddress);
+    dealScopedLog(dealId, `🏠 Address extraction results:`);
+    dealScopedLog(dealId, `   🏢 Deal shipping:`, dealShippingAddress);
+    dealScopedLog(dealId, `   🏢 Deal billing:`, dealBillingAddress);
+    dealScopedLog(dealId, `   📦 Invoice shipping:`, invoiceShippingAddress);
+    dealScopedLog(dealId, `   💰 Invoice billing:`, invoiceBillingAddress);
+    dealScopedLog(dealId, `   👤 Contact address:`, contactAddress);
+    dealScopedLog(dealId, `   🏢 Company address:`, companyAddress);
     
     // Build final addresses with proper fallback logic
     // Priority: Deal address → Invoice/Quote address → Company address → Contact address → Manual entry
@@ -2158,16 +2165,16 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     
     // If we still don't have addresses, ensure both billing and shipping use the same contact address
     if (!shippingAddress && !billingAddress && contactAddress) {
-      console.log(`⚠️ No specific address data found, using contact address for both shipping and billing`);
+      dealScopedLog(dealId, `⚠️ No specific address data found, using contact address for both shipping and billing`);
       shippingAddress = contactAddress;
       billingAddress = contactAddress;
     }
     
     // Final validation - ensure we have addresses
     if (!shippingAddress || !billingAddress) {
-      console.log(`🚨 WARNING: Missing address data after all fallbacks`);
-      console.log(`   📦 Shipping address: ${!!shippingAddress}`);
-      console.log(`   💰 Billing address: ${!!billingAddress}`);
+      dealScopedLog(dealId, `🚨 WARNING: Missing address data after all fallbacks`);
+      dealScopedLog(dealId, `   📦 Shipping address: ${!!shippingAddress}`);
+      dealScopedLog(dealId, `   💰 Billing address: ${!!billingAddress}`);
     }
     
     // Manual address database for known customers (temporary solution)
@@ -2237,11 +2244,11 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     let knownAddress = knownAddresses[dealKey] || knownAddresses[emailKey];
     
     if (knownAddress) {
-      console.log(`🔧 Applying manual address override for ${dealKey} / ${emailKey}`);
+      dealScopedLog(dealId, `🔧 Applying manual address override for ${dealKey} / ${emailKey}`);
       
       // Check if this is the new structure with separate billing/shipping
       if (knownAddress.billing && knownAddress.shipping) {
-        console.log(`📍 Found separate billing and shipping addresses`);
+        dealScopedLog(dealId, `📍 Found separate billing and shipping addresses`);
         
         const manualBillingAddress = {
           first_name: firstName,
@@ -2270,12 +2277,12 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         billingAddress = manualBillingAddress;
         shippingAddress = manualShippingAddress;
         
-        console.log(`🔧 Manual billing address applied:`, manualBillingAddress);
-        console.log(`🔧 Manual shipping address applied:`, manualShippingAddress);
+        dealScopedLog(dealId, `🔧 Manual billing address applied:`, manualBillingAddress);
+        dealScopedLog(dealId, `🔧 Manual shipping address applied:`, manualShippingAddress);
         
       } else {
         // Legacy format - use same address for both billing and shipping
-        console.log(`📍 Found legacy single address format`);
+        dealScopedLog(dealId, `📍 Found legacy single address format`);
         const manualAddress = {
           first_name: firstName,
           last_name: lastName,
@@ -2289,11 +2296,11 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         };
         shippingAddress = manualAddress;
         billingAddress = manualAddress;
-        console.log(`🔧 Manual address applied (legacy format):`, manualAddress);
+        dealScopedLog(dealId, `🔧 Manual address applied (legacy format):`, manualAddress);
       }
     } else {
-      console.log(`⚠️ No manual address found for deal ${dealKey} or email ${emailKey}`);
-      console.log(`📝 Consider adding address manually to knownAddresses database`);
+      dealScopedLog(dealId, `⚠️ No manual address found for deal ${dealKey} or email ${emailKey}`);
+      dealScopedLog(dealId, `📝 Consider adding address manually to knownAddresses database`);
     }
     
     // Log address source information for debugging
@@ -2310,9 +2317,23 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       return 'Manual Override';
     };
     
-    console.log(`🏠 Final addresses:`);
-    console.log(`   📦 Shipping: ${getAddressSource(shippingAddress, true)} ->`, shippingAddress);
-    console.log(`   💰 Billing: ${getAddressSource(billingAddress, false)} ->`, billingAddress);
+    dealScopedLog(dealId, `🏠 Final addresses:`);
+    dealScopedLog(dealId, `   📦 Shipping: ${getAddressSource(shippingAddress, true)} ->`, shippingAddress);
+    dealScopedLog(dealId, `   💰 Billing: ${getAddressSource(billingAddress, false)} ->`, billingAddress);
+
+    // Ensure company name is populated from associated company when missing
+    let associatedCompanyName = null;
+    try {
+      const companies = await hubspotClient.getAssociatedCompanies(dealId);
+      if (Array.isArray(companies) && companies.length > 0) {
+        associatedCompanyName = companies[0]?.properties?.name || companies[0]?.name || null;
+      }
+    } catch (_) {}
+
+    if (associatedCompanyName) {
+      if (billingAddress && !billingAddress.company) billingAddress.company = associatedCompanyName;
+      if (shippingAddress && !shippingAddress.company) shippingAddress.company = billingAddress?.company || associatedCompanyName;
+    }
 
     // Create order via Shopify REST API
     const orderData = {
@@ -2365,14 +2386,14 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       }
     };
 
-    console.log(`🛒 Creating Shopify order with ${shopifyLineItems.length} line items from HubSpot invoice`);
+    dealScopedLog(dealId, `🛒 Creating Shopify order with ${shopifyLineItems.length} line items from HubSpot invoice`);
     
     // Debug tax information
     if (invoiceInfo && invoiceInfo.tax > 0) {
-      console.log(`💰 Adding tax to Shopify order: $${invoiceInfo.tax} (${((invoiceInfo.tax / invoiceInfo.subtotal) * 100).toFixed(1)}%)`);
-      console.log(`💰 Order data tax_lines:`, JSON.stringify(orderData.order.tax_lines, null, 2));
+      dealScopedLog(dealId, `💰 Adding tax to Shopify order: $${invoiceInfo.tax} (${((invoiceInfo.tax / invoiceInfo.subtotal) * 100).toFixed(1)}%)`);
+      dealScopedLog(dealId, `💰 Order data tax_lines:`, JSON.stringify(orderData.order.tax_lines, null, 2));
     } else {
-      console.log(`⚠️ No tax information found in invoice data`);
+      dealScopedLog(dealId, `⚠️ No tax information found in invoice data`);
     }
 
     // If addresses are effectively the same, propagate missing fields both ways
@@ -2400,7 +2421,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
     }
 
     // Log the complete order data being sent to Shopify for debugging
-    console.log(`🔍 Complete Shopify order payload:`, JSON.stringify(orderData, null, 2));
+    dealScopedLog(dealId, `🔍 Complete Shopify order payload:`, JSON.stringify(orderData, null, 2));
 
     let createdOrder;
     try {
