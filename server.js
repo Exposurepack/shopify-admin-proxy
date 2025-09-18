@@ -1883,6 +1883,16 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       return { first, last };
     };
 
+    // Detect when a supposed name is actually an address-like string
+    const isAddressLikeName = (value) => {
+      if (!value || typeof value !== 'string') return false;
+      const v = value.toLowerCase();
+      if (/\d/.test(v)) return true; // contains numbers (e.g., 5 Clitus)
+      // common street tokens
+      if (/(\b|_)(ave|avenue|st|street|rd|road|dr|drive|ln|lane|hwy|highway|blvd|boulevard|ct|court|pl|place|way|cres|crescent|pde|parade|terrace|ter)(\b|_)/i.test(v)) return true;
+      return false;
+    };
+
     // Determine company name for customer record
     const companyName = contactProps.company || 
                        deal.properties.dealname?.split(' - ')[0] || // Extract from deal name
@@ -2032,8 +2042,9 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         ? (props.hs_recipient_shipping_name || props.shipping_name || props.ship_to_name || props.recipient_name || null)
         : (props.hs_recipient_company_name || props.billing_name || props.bill_to_name || props.recipient_billing_name || null);
       const parsed = splitName(recipientName || '');
-      const addrFirst = parsed.first || firstName;
-      const addrLast = parsed.last || lastName;
+      const fallbackToContact = isAddressLikeName(recipientName) || !parsed.first || !parsed.last;
+      const addrFirst = fallbackToContact ? firstName : (parsed.first || firstName);
+      const addrLast = fallbackToContact ? lastName : (parsed.last || lastName);
       
       // Only return if we have at least address1 or city
       if (addressData.address1 || addressData.city) {
