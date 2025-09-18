@@ -3926,14 +3926,16 @@ app.put("/orders/:id/shipping-address", authenticate, async (req, res) => {
 app.post("/orders/:id/split", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
+    // Accept either numeric legacy ID or a GID (gid://shopify/Order/123)
+    const legacyId = String(id).replace(/\D+/g, "");
     const { allocations = {}, includeShared = true } = req.body || {};
 
-    if (!id) {
+    if (!legacyId) {
       return res.status(400).json({ error: "Missing order id" });
     }
 
     // Fetch original order via REST API to ensure we have complete, current data
-    const originalResp = await restClient.get(`/orders/${encodeURIComponent(id)}.json`);
+    const originalResp = await restClient.get(`/orders/${encodeURIComponent(legacyId)}.json`);
     const originalOrder = originalResp.order || originalResp;
 
     if (!originalOrder || !Array.isArray(originalOrder.line_items)) {
