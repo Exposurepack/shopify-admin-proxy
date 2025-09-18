@@ -1526,7 +1526,7 @@ async function createHubSpotDealFromShopifyOrder(order) {
       pipeline: pipelineId,
       dealstage: stageId,
       closedate: Date.now(),
-      deal_currency_code: currency
+      hs_deal_currency_code: currency
     };
 
     // Add optional custom properties only if the portal likely supports them.
@@ -1574,7 +1574,7 @@ async function createHubSpotDealFromShopifyOrder(order) {
         pipeline: dealData.pipeline,
         dealstage: dealData.dealstage,
         closedate: dealData.closedate,
-        deal_currency_code: dealData.deal_currency_code
+        hs_deal_currency_code: dealData.hs_deal_currency_code
       };
       try {
         deal = await hubspotClient.upsertDealByProperty('shopify_order_id', minimal);
