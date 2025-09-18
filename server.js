@@ -2502,12 +2502,35 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       );
     }
 
-    // Save HubSpot deal notes into Shopify metafield custom.notes (JSON)
+    // Save HubSpot deal notes into Shopify metafield custom.notes (plain text)
     try {
       // Attempt to gather notes from available objects: deal description, invoice/quote notes, contact/company
       const notes = [];
+      // Convert rich HTML snippets from HubSpot into readable plain text
+      const htmlToPlainText = (value) => {
+        if (value == null) return '';
+        let s = String(value);
+        // Normalize line breaks for common block elements
+        s = s.replace(/<\s*br\s*\/?\s*>/gi, '\n');
+        s = s.replace(/<\s*\/(p|div|li|h[1-6])\s*>/gi, '\n');
+        // Remove all remaining tags
+        s = s.replace(/<[^>]+>/g, '');
+        // Decode common HTML entities
+        s = s.replace(/&nbsp;/gi, ' ')
+             .replace(/&amp;/gi, '&')
+             .replace(/&lt;/gi, '<')
+             .replace(/&gt;/gi, '>')
+             .replace(/&quot;/gi, '"')
+             .replace(/&#39;/gi, "'");
+        // Collapse excessive whitespace and blank lines
+        s = s.replace(/\r\n|\r/g, '\n');
+        s = s.replace(/\n{3,}/g, '\n\n');
+        s = s.replace(/\s+$/gm, '');
+        return s.trim();
+      };
       const pushNote = (source, text) => {
-        const t = (text || '').toString().trim();
+        const raw = (text || '').toString();
+        const t = htmlToPlainText(raw);
         if (t.length > 0) notes.push({ source, text: t });
       };
 
@@ -2556,7 +2579,7 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
         if (ip.hs_recipient_shipping_name) pushNote('invoice.recipient_name', ip.hs_recipient_shipping_name);
       }
 
-      // Render as readable multi-line text (definition expects multi_line_text_field)
+      // Render as readable multi-line text (stored as multi_line_text_field)
       const lines = [];
       lines.push(`Deal: ${dealName} (ID ${dealId})`);
       notes.forEach((n, i) => lines.push(`${i + 1}. [${n.source}] ${n.text}`));
