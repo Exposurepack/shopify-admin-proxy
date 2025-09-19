@@ -4113,6 +4113,36 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
       // Create the order
       const resp = await restClient.post('/orders.json', orderPayload);
       const newOrder = resp.order || resp;
+      
+      // After creating the split order, copy relevant metafields from the original order
+      try {
+        const originalOrderGID = `gid://shopify/Order/${legacyId}`;
+        const newOrderGID = `gid://shopify/Order/${newOrder.id}`;
+        const namespacesToCopy = ['custom', 'hubspot'];
+        const excludedKeysByNamespace = {
+          custom: new Set(['deleted'])
+        };
+
+        for (const ns of namespacesToCopy) {
+          try {
+            const edges = await metafieldManager.listMetafields(originalOrderGID, ns);
+            if (!Array.isArray(edges) || edges.length === 0) continue;
+            for (const edge of edges) {
+              const mf = edge?.node || {};
+              const key = mf.key;
+              if (!key) continue;
+              if (excludedKeysByNamespace[ns] && excludedKeysByNamespace[ns].has(key)) continue;
+              const value = mf.value != null ? String(mf.value) : '';
+              const type = mf.type || 'single_line_text_field';
+              await metafieldManager.setMetafield(newOrderGID, ns, key, value, type);
+            }
+          } catch (nsErr) {
+            console.warn(`⚠️ Failed to copy ${ns} metafields to split order ${newOrder.id} (${supplier}): ${nsErr.message}`);
+          }
+        }
+      } catch (copyErr) {
+        console.warn(`⚠️ Metafield copy step failed for split order ${newOrder?.id} (${supplier}): ${copyErr.message}`);
+      }
       created.push({ supplier, order: newOrder });
     }
 
