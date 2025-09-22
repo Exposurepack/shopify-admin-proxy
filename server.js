@@ -1150,7 +1150,40 @@ class HubSpotClient {
       return response.data;
 
     } catch (error) {
-      console.error(`❌ Failed to create deal:`, error.response?.data?.message || error.message);
+      const data = error.response?.data;
+      // Extract unsupported property names from common HubSpot error shapes or message string
+      const collect = (arr) => (Array.isArray(arr) ? arr.map(e => e?.name || e?.field || e?.property || e?.context?.propertyName).filter(Boolean) : []);
+      let missing = collect(data?.errors);
+      if (!missing.length) missing = collect(data?.validationResults);
+      if (!missing.length && typeof data?.message === 'string') {
+        const guesses = [];
+        const re1 = /"name":"(.*?)"/g;
+        const re2 = /Property\s+"(.*?)"\s+does not exist/g;
+        let m;
+        while ((m = re1.exec(data.message))) guesses.push(m[1]);
+        while ((m = re2.exec(data.message))) guesses.push(m[1]);
+        missing = Array.from(new Set(guesses));
+      }
+
+      if (missing.length) {
+        const sanitized = { ...dealData };
+        missing.forEach(n => { try { delete sanitized[n]; } catch (_) {} });
+        try {
+          console.warn(`⚠️ Retrying deal create without unsupported properties: ${missing.join(', ')}`);
+          const resp2 = await axios.post(
+            `${this.baseURL}/crm/v3/objects/deals`,
+            { properties: sanitized },
+            { headers: this.headers }
+          );
+          console.log(`✅ Created deal (sanitized): ${resp2.data.id} - ${sanitized.dealname}`);
+          return resp2.data;
+        } catch (e2) {
+          console.error(`❌ Failed to create deal after sanitizing:`, e2.response?.data?.message || e2.message);
+          throw e2;
+        }
+      }
+
+      console.error(`❌ Failed to create deal:`, data?.message || error.message);
       throw error;
     }
   }
@@ -1787,6 +1820,12 @@ async function createShopifyOrderFromHubspotInvoice(dealId) {
       dealScopedLog(dealId, `💰 Invoice info: ${invoiceInfo.number} - Subtotal: $${invoiceInfo.subtotal}, Tax: $${invoiceInfo.tax}, Total: $${invoiceInfo.total}`);
     } else {
       dealScopedLog(dealId, `🧾 No invoice data found`);
+    }
+
+    // Require an attached invoice before creating a Shopify order
+    if (!invoiceInfo) {
+      dealScopedLog(dealId, `🛑 No invoice attached to deal. Skipping Shopify order creation.`);
+      return { order: null, skipped: true, reason: 'no invoice attached' };
     }
 
     // Get primary contact (first one)
@@ -5199,7 +5238,17 @@ app.post("/webhook", async (req, res) => {
           return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped', dealId: objectId });
         }
         const result = await createShopifyOrderFromHubspotInvoice(objectId);
-        
+
+        if (result && result.skipped) {
+          console.log(`⏭️ Skipped creating Shopify order for deal ${objectId}: ${result.reason}`);
+          return res.status(200).json({
+            received: true,
+            processed: true,
+            message: `Skipped creating order: ${result.reason}`,
+            dealId: objectId
+          });
+        }
+
         console.log(`✅ Successfully created Shopify order from HubSpot deal ${objectId}`);
 
         // Mark processed to avoid re-runs in quick succession
