@@ -4040,11 +4040,11 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
 
     // Determine shared line items (Shipping and Rushed) by title semantics
     const allLineItems = originalOrder.line_items;
-    const isSharedTitle = (title) => {
-      const t = String(title || '').toLowerCase();
+    const isSharedTitle = (titleOrName) => {
+      const t = String(titleOrName || '').toLowerCase();
       return t.includes('shipping') || t.includes('rushed');
     };
-    const sharedLineItems = includeShared ? allLineItems.filter(li => isSharedTitle(li.title)) : [];
+    const sharedLineItems = includeShared ? allLineItems.filter(li => isSharedTitle(li.title) || isSharedTitle(li.name)) : [];
 
     // Normalise incoming allocations to REST numeric line_item IDs
     const normalisedAllocations = Object.fromEntries(
@@ -4073,15 +4073,20 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
     }
 
     // Helper to transform an original line item into a create-order line item
-    const toCreateLineItem = (item) => ({
-      // Use variant_id when available for proper inventory and pricing; also set price to preserve original charged price
-      ...(item.variant_id ? { variant_id: item.variant_id } : {}),
-      quantity: item.quantity || 1,
-      // Preserve original price where possible to keep totals aligned with the original order
-      ...(item.price ? { price: String(item.price) } : {}),
-      // Carry over properties if present (engraving, notes, etc.)
-      ...(item.properties && Object.keys(item.properties || {}).length > 0 ? { properties: item.properties } : {})
-    });
+    const toCreateLineItem = (item) => {
+      const hasVariant = Boolean(item.variant_id);
+      const fallbackTitle = String(item.title || item.name || item.sku || 'Custom item');
+      const base = {
+        quantity: item.quantity || 1,
+        ...(item.price ? { price: String(item.price) } : {}),
+        ...(item.properties && Object.keys(item.properties || {}).length > 0 ? { properties: item.properties } : {})
+      };
+      if (hasVariant) {
+        return { variant_id: item.variant_id, ...base };
+      }
+      // For HubSpot-imported or custom items without variant_id, Shopify requires a title for custom line items
+      return { title: fallbackTitle, ...base };
+    };
 
     // Build and create new orders per supplier
     const created = [];
