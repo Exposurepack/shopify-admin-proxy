@@ -4122,17 +4122,15 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
         : typeof originalOrder.tags === 'string' && originalOrder.tags.length > 0
           ? originalOrder.tags.split(',').map(s => s.trim()).filter(Boolean)
           : [];
+      // Switch to metafield-driven supplier assignment instead of tagging
       const tags = Array.from(new Set([
         ...originalTags,
-        `split-from-${originalOrder.id}`,
-        `supplier-${supplier}`,
-        supplier.toUpperCase()
+        `split-from-${originalOrder.id}`
       ]));
 
       const note_attributes = [
         { name: 'split_from_order_id', value: String(originalOrder.id) },
-        { name: 'split_from_order_name', value: String(originalOrder.name || '') },
-        { name: 'split_supplier', value: supplier }
+        { name: 'split_from_order_name', value: String(originalOrder.name || '') }
       ];
 
       const orderPayload = {
@@ -4186,6 +4184,30 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
         }
       } catch (copyErr) {
         console.warn(`⚠️ Metafield copy step failed for split order ${newOrder?.id} (${supplier}): ${copyErr.message}`);
+      }
+
+      // Set metafield custom.supplier_name explicitly for the new split order (source of truth)
+      try {
+        const newOrderGID = `gid://shopify/Order/${newOrder.id}`;
+        // Map internal codes to full names when known
+        const mapToLabel = (code) => {
+          const c = String(code || '').toUpperCase();
+          if (c === 'PCW') return 'Paper Cups Wholesale';
+          if (c === 'SLP') return 'Full Colour Print (SLP)';
+          if (c === 'SP')  return 'Screen Print';
+          if (c === 'GWP') return 'General Wholesale Print';
+          if (c === 'FC')  return 'Foyer Coasters';
+          return String(code);
+        };
+        await metafieldManager.setMetafield(
+          newOrderGID,
+          'custom',
+          'supplier_name',
+          mapToLabel(supplier),
+          'single_line_text_field'
+        );
+      } catch (mfErr) {
+        console.warn(`⚠️ Failed to set supplier_name metafield on split order ${newOrder?.id}: ${mfErr.message}`);
       }
       created.push({ supplier, order: newOrder });
     }
