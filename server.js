@@ -3010,6 +3010,28 @@ app.post("/orders/:id/delete", authenticate, async (req, res) => {
 });
 
 /**
+ * Restore a soft-deleted order by clearing the custom.deleted metafield
+ */
+app.post("/orders/:id/restore", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const legacyId = String(id).replace(/\D/g, "");
+    const orderGID = `gid://shopify/Order/${legacyId}`;
+
+    // Attempt to find the metafield first; ignore if absent
+    const existing = await metafieldManager.findMetafield(orderGID, "custom", "deleted");
+    if (existing?.id) {
+      await metafieldManager.deleteMetafield(existing.id);
+    }
+
+    res.json({ success: true, id: legacyId, restored: true });
+  } catch (error) {
+    const status = error.response?.status || 500;
+    res.status(status).json({ error: "Failed to restore order", message: error.message });
+  }
+});
+
+/**
  * Test endpoint to verify server connectivity
  */
 app.get("/fulfillments/test", (req, res) => {
