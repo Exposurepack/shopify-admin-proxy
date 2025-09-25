@@ -3471,7 +3471,8 @@ app.get("/orders", async (req, res) => {
       paginate = "false",
       after,
       financial_status,
-      fulfillment_status
+      fulfillment_status,
+      includeDeleted = "false"
     } = req.query;
 
     const pageSize = Math.min(parseInt(limit), 250); // Shopify max per page
@@ -3723,10 +3724,11 @@ app.get("/orders", async (req, res) => {
       };
     });
 
-    const filtered = (mergedOrders || transformedOrders).filter(o => !o.deleted);
+    const includeDeletedBool = String(includeDeleted).toLowerCase() === "true";
+    const resultOrders = includeDeletedBool ? (mergedOrders || transformedOrders) : (mergedOrders || transformedOrders).filter(o => !o.deleted);
     const response = {
-      orders: filtered,
-      count: filtered.length,
+      orders: resultOrders,
+      count: resultOrders.length,
       pagination: shouldPaginate ? {
         total_fetched: transformedOrders.length,
         method: "full_pagination"
@@ -3736,7 +3738,7 @@ app.get("/orders", async (req, res) => {
       }
     };
 
-    console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.`);
+    console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.${includeDeletedBool ? " (including deleted)" : ""}`);
     res.json(response);
 
   } catch (error) {
