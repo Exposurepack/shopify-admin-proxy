@@ -4216,10 +4216,10 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
         // Map internal codes to full names when known
         const mapToLabel = (code) => {
           const c = String(code || '').toUpperCase();
-          if (c === 'PCW') return 'Paper Cups Wholesale';
-          if (c === 'SLP') return 'Full Colour Print (SLP)';
-          if (c === 'SP')  return 'Screen Print';
-          if (c === 'GWP') return 'General Wholesale Print';
+          if (c === 'PCW') return 'Paper Cup World';
+          if (c === 'SLP') return 'Simple Life Packaging';
+          if (c === 'SP')  return 'Superior Paper';
+          if (c === 'GWP') return 'Greenwave Printing';
           if (c === 'FC')  return 'Foyer Coasters';
           return String(code);
         };
