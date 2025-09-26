@@ -365,6 +365,14 @@ class ShopifyRESTClient {
     });
     return response.data;
   }
+
+  async put(endpoint, data) {
+    const response = await axios.put(`${this.baseURL}${endpoint}`, data, {
+      headers: this.headers,
+      timeout: 30000
+    });
+    return response.data;
+  }
 }
 
 /**
@@ -2687,6 +2695,8 @@ const processedHubspotContacts = new Map(); // contactId -> timestamp
 
 // In-flight concurrency locks to prevent simultaneous processing for same deal
 const processingDeals = new Set(); // dealId currently being processed
+// In-flight concurrency locks to prevent simultaneous processing for same Shopify order
+const processingOrders = new Set(); // orderId currently being processed
 
 const acquireDealLock = (dealId) => {
   const key = String(dealId);
@@ -2698,6 +2708,18 @@ const acquireDealLock = (dealId) => {
 const releaseDealLock = (dealId) => {
   const key = String(dealId);
   if (processingDeals.has(key)) processingDeals.delete(key);
+};
+
+const acquireOrderLock = (orderId) => {
+  const key = String(orderId);
+  if (processingOrders.has(key)) return false;
+  processingOrders.add(key);
+  return true;
+};
+
+const releaseOrderLock = (orderId) => {
+  const key = String(orderId);
+  if (processingOrders.has(key)) processingOrders.delete(key);
 };
 
 const wasDealRecentlyProcessed = (dealId, ttlMs = 10 * 60 * 1000) => {
@@ -4953,9 +4975,16 @@ app.post("/shopify-webhook", async (req, res) => {
     console.log(`👤 Customer: ${order.customer?.email || 'N/A'}`);
     console.log(`📦 Line items: ${order.line_items?.length || 0}`);
 
-    // Order-level idempotency: skip if we've just processed this order ID
+    // In-flight lock to prevent concurrent processing of the same order
+    if (!acquireOrderLock(order.id)) {
+      console.log(`🛑 Skipping HubSpot deal creation for order ${order.name}: in-flight duplicate`);
+      return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped' });
+    }
+
+    // Order-level idempotency: skip if we've just processed this order ID very recently
     if (wasOrderRecentlyProcessed(order.id)) {
       console.log(`🛑 Skipping HubSpot deal creation for order ${order.name}: recently processed`);
+      releaseOrderLock(order.id);
       return res.status(200).json({ received: true, processed: false, message: 'Duplicate order webhook skipped' });
     }
 
@@ -5001,6 +5030,7 @@ app.post("/shopify-webhook", async (req, res) => {
         tags: tagsValue
       });
       markOrderProcessed(order.id);
+      releaseOrderLock(order.id);
       return res.status(200).json({ received: true, processed: false, message: 'Skipped split child order' });
     }
 
@@ -5010,6 +5040,7 @@ app.post("/shopify-webhook", async (req, res) => {
       if (Array.isArray(existingDeals) && existingDeals.length > 0) {
         console.log(`🛑 Existing HubSpot deal(s) found for order ${order.name}. Skipping creation.`);
         markOrderProcessed(order.id);
+        releaseOrderLock(order.id);
         return res.status(200).json({ received: true, processed: false, message: 'Existing deal found, skipped', orderId: order.id });
       }
     } catch (searchErr) {
@@ -5020,6 +5051,7 @@ app.post("/shopify-webhook", async (req, res) => {
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
     // Mark order processed to prevent rapid duplicate processing
     markOrderProcessed(order.id);
+    releaseOrderLock(order.id);
 
     const processingTime = Date.now() - startTime;
     console.log(`⏱️ Webhook processing completed in ${processingTime}ms`);
@@ -5048,6 +5080,9 @@ app.post("/shopify-webhook", async (req, res) => {
       message: "Error occurred but webhook acknowledged",
       processingTimeMs: processingTime
     });
+  } finally {
+    // Ensure lock is released on all code paths
+    try { if (req?.body?.id) releaseOrderLock(req.body.id); } catch (_) {}
   }
 });
 
