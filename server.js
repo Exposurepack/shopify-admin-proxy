@@ -1457,7 +1457,8 @@ async function createHubSpotDealFromShopifyOrder(order) {
       email: customer.email || billingAddress.email || 'unknown@shopify.com',
       firstname: customer.first_name || billingAddress.first_name || '',
       lastname: customer.last_name || billingAddress.last_name || '',
-      phone: customer.phone || billingAddress.phone || '',
+      // Prefer shipping phone (customer often enters phone on shipping), then order-level phone, then customer/billing
+      phone: shippingAddress.phone || order.phone || customer.phone || billingAddress.phone || '',
       company: billingAddress.company || shippingAddress.company || '',
       
       // Default contact address (use shipping address as primary, fallback to billing)
@@ -1496,6 +1497,7 @@ async function createHubSpotDealFromShopifyOrder(order) {
       console.log(`   Email: ${contactData.email}`);
       console.log(`   Name: ${contactData.firstname} ${contactData.lastname}`);
       console.log(`   Company: ${contactData.company}`);
+      console.log(`   Phone: ${contactData.phone || 'N/A'}`);
       console.log(`   Billing Address: ${contactData.billing_address}, ${contactData.billing_city}, ${contactData.billing_state} ${contactData.billing_zip}`);
       console.log(`   Shipping Address: ${contactData.shipping_address}, ${contactData.shipping_city}, ${contactData.shipping_state} ${contactData.shipping_zip}`);
       
