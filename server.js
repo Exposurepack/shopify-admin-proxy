@@ -140,12 +140,12 @@ app.use(cors(corsOptions));
 
 // Body parsing with size limits
 app.use(express.json({ 
-  limit: '15mb',
+  limit: '10mb',
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Session (required for OAuth with cookies; cross-site needs SameSite=None)
 app.use(session({
@@ -3488,16 +3488,10 @@ app.post("/upload-file", upload.single('file'), async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     if (LOG_VERBOSE) console.log("📋 Fetching orders with enhanced pagination...");
-
-    const { 
-      limit = 50, 
-      status = "any", 
-      paginate = "false",
-      after,
-      financial_status,
-      fulfillment_status,
-      includeDeleted = "false"
-    } = req.query;
+    const { limit = 50, status = "any", paginate = "false", after, financial_status, fulfillment_status, includeDeleted = "false" } = req.query;
+    const cacheKey = `orders:${limit}:${status}:${paginate}:${after || ''}:${financial_status || ''}:${fulfillment_status || ''}:${includeDeleted}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) { if (LOG_VERBOSE) console.log("🟡 Cache hit /orders"); return res.json(cached); }
 
     const pageSize = Math.min(parseInt(limit), 250); // Shopify max per page
     const shouldPaginate = paginate === "true";
@@ -3763,6 +3757,7 @@ app.get("/orders", async (req, res) => {
     };
 
     console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.${includeDeletedBool ? " (including deleted)" : ""}`);
+    cacheSet(cacheKey, response, 60000);
     res.json(response);
 
   } catch (error) {
@@ -3777,8 +3772,10 @@ app.get("/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const legacyId = id.replace(/\D/g, ''); // Extract numeric ID
-    
     if (LOG_VERBOSE) console.log(`🔍 Fetching detailed order: ${legacyId}`);
+    const cacheKey = `order:${legacyId}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) { if (LOG_VERBOSE) console.log("🟡 Cache hit /orders/:id"); return res.json(cached); }
 
     const orderQuery = `
       query GetOrder($id: ID!) {
@@ -3960,7 +3957,9 @@ app.get("/orders/:id", async (req, res) => {
     };
 
     console.log(`🟢 Order loaded: ${node.name} (${legacyId}).`);
-    res.json(orderData);
+    const response = { order: orderData };
+    cacheSet(cacheKey, response, 60000);
+    res.json(response);
 
   } catch (error) {
     handleError(error, res, "Failed to fetch individual order");
@@ -3984,8 +3983,12 @@ app.get("/rest/orders/:id", async (req, res) => {
 
 app.get("/rest/locations", async (req, res) => {
   try {
-    console.log("🔄 REST: fetching locations");
+    if (LOG_VERBOSE) console.log("🔄 REST: fetching locations");
+    const cacheKey = `rest:locations`;
+    const cached = cacheGet(cacheKey);
+    if (cached) { if (LOG_VERBOSE) console.log("🟡 Cache hit /rest/locations"); return res.json(cached); }
     const locationsData = await restClient.get("/locations.json");
+    cacheSet(cacheKey, locationsData, 60000);
     res.json(locationsData);
   } catch (error) {
     handleError(error, res, "REST locations fetch failed");
