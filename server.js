@@ -140,12 +140,12 @@ app.use(cors(corsOptions));
 
 // Body parsing with size limits
 app.use(express.json({ 
-  limit: '15mb',
+  limit: '10mb',
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Session (required for OAuth with cookies; cross-site needs SameSite=None)
 app.use(session({
@@ -3059,7 +3059,7 @@ app.post("/orders/:id/restore", authenticate, async (req, res) => {
  * Test endpoint to verify server connectivity
  */
 app.get("/fulfillments/test", (req, res) => {
-  console.log("🧪 Test endpoint hit");
+  if (LOG_VERBOSE) console.log("🧪 Test endpoint hit");
   res.json({ 
     message: "Fulfillment endpoint is reachable",
     timestamp: new Date().toISOString(),
@@ -3071,7 +3071,7 @@ app.get("/fulfillments/test", (req, res) => {
  * Debug endpoint to check if fulfillments path works
  */
 app.get("/fulfillments", (req, res) => {
-  console.log("🧪 GET /fulfillments hit (should be POST)");
+  if (LOG_VERBOSE) console.log("🧪 GET /fulfillments hit (should be POST)");
   res.json({ 
     error: "Method not allowed",
     message: "This endpoint only accepts POST requests",
@@ -3625,6 +3625,13 @@ app.get("/orders", async (req, res) => {
       if (LOG_VERBOSE) console.log("🔄 Using pagination to fetch all orders...");
       orders = await graphqlClient.queryWithPagination(ordersQuery, variables, pageSize);
     } else {
+      // Cache list response for 60s keyed by variables
+      const cacheKey = `orders.${pageSize}.${after || 'start'}.${statusFilter || 'any'}.${financial_status || 'all'}.${fulfillment_status || 'all'}.${includeDeleted}`;
+      const cached = __getCache(cacheKey);
+      if (cached) {
+        if (LOG_VERBOSE) console.log('📦 Cache hit for /orders');
+        return res.json(cached);
+      }
       const data = await graphqlClient.query(ordersQuery, variables);
       orders = data.data.orders.edges;
     }
@@ -3762,7 +3769,12 @@ app.get("/orders", async (req, res) => {
       }
     };
 
-    console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.${includeDeletedBool ? " (including deleted)" : ""}`);
+    if (LOG_VERBOSE) console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.${includeDeletedBool ? " (including deleted)" : ""}`);
+    // Store in cache if not full-pagination
+    if (!shouldPaginate) {
+      const cacheKey = `orders.${pageSize}.${after || 'start'}.${statusFilter || 'any'}.${financial_status || 'all'}.${fulfillment_status || 'all'}.${includeDeleted}`;
+      __setCache(cacheKey, response);
+    }
     res.json(response);
 
   } catch (error) {
@@ -3886,6 +3898,10 @@ app.get("/orders/:id", async (req, res) => {
     `;
 
     const orderGID = `gid://shopify/Order/${legacyId}`;
+    // Cache single order for 60s
+    const cacheKey = `order.${legacyId}`;
+    const cached = __getCache(cacheKey);
+    if (cached) return res.json(cached);
     const data = await graphqlClient.query(orderQuery, { id: orderGID });
     
     if (!data.data.order) {
@@ -3959,7 +3975,8 @@ app.get("/orders/:id", async (req, res) => {
       line_items: lineItems,
     };
 
-    console.log(`🟢 Order loaded: ${node.name} (${legacyId}).`);
+    if (LOG_VERBOSE) console.log(`🟢 Order loaded: ${node.name} (${legacyId}).`);
+    __setCache(cacheKey, orderData);
     res.json(orderData);
 
   } catch (error) {
@@ -3982,10 +3999,26 @@ app.get("/rest/orders/:id", async (req, res) => {
   }
 });
 
+// Simple in-memory cache (60s TTL) for lightweight GETs
+const __cache = new Map();
+const __getCache = (key) => {
+  const hit = __cache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiry) { __cache.delete(key); return null; }
+  return hit.value;
+};
+const __setCache = (key, value, ttlMs = 60000) => {
+  __cache.set(key, { value, expiry: Date.now() + ttlMs });
+};
+
 app.get("/rest/locations", async (req, res) => {
   try {
-    console.log("🔄 REST: fetching locations");
+    const cacheKey = 'rest.locations';
+    const cached = __getCache(cacheKey);
+    if (cached) return res.json(cached);
+    if (LOG_VERBOSE) console.log("🔄 REST: fetching locations");
     const locationsData = await restClient.get("/locations.json");
+    __setCache(cacheKey, locationsData);
     res.json(locationsData);
   } catch (error) {
     handleError(error, res, "REST locations fetch failed");
@@ -4758,7 +4791,10 @@ const ensureGoogle = async (req, res, next) => {
 };
 
 // Start Google OAuth (request offline access for refresh_token)
-app.get('/auth/google',
+// Gate Google routes with ENABLE_GOOGLE=1 to avoid unnecessary overhead
+const ENABLE_GOOGLE = process.env.ENABLE_GOOGLE === '1';
+
+ENABLE_GOOGLE && app.get('/auth/google',
   (req, res, next) => {
     const scope = [
       "https://www.googleapis.com/auth/userinfo.email",
@@ -4778,7 +4814,7 @@ app.get('/auth/google',
 );
 
 // OAuth callback: persist tokens in session, redirect to admin dashboard
-app.get('/auth/google/callback', (req, res, next) => {
+ENABLE_GOOGLE && app.get('/auth/google/callback', (req, res, next) => {
   passport.authenticate('google', { failureRedirect: '/auth/google/failure' }, (err, user) => {
     if (err || !user) return res.redirect('/auth/google/failure');
     req.login(user, (loginErr) => {
@@ -4796,11 +4832,11 @@ app.get('/auth/google/callback', (req, res, next) => {
   })(req, res, next);
 });
 
-app.get('/auth/google/failure', (req, res) => {
+ENABLE_GOOGLE && app.get('/auth/google/failure', (req, res) => {
   res.status(401).json({ error: "Google authentication failed" });
 });
 
-app.post('/auth/google/logout', (req, res) => {
+ENABLE_GOOGLE && app.post('/auth/google/logout', (req, res) => {
   try {
     if (req.logout) req.logout(() => {});
     if (req.session) req.session.google = null;
