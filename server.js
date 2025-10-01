@@ -3488,8 +3488,9 @@ app.post("/upload-file", upload.single('file'), async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     if (LOG_VERBOSE) console.log("📋 Fetching orders with enhanced pagination...");
-    const { limit = 50, status = "any", paginate = "false", after, financial_status, fulfillment_status, includeDeleted = "false" } = req.query;
-    const cacheKey = `orders:${limit}:${status}:${paginate}:${after || ''}:${financial_status || ''}:${fulfillment_status || ''}:${includeDeleted}`;
+    const { limit = 50, status = "any", paginate = "false", after, cursor, financial_status, fulfillment_status, includeDeleted = "false" } = req.query;
+    const effectiveAfter = after || cursor || '';
+    const cacheKey = `orders:${limit}:${status}:${paginate}:${effectiveAfter}:${financial_status || ''}:${fulfillment_status || ''}:${includeDeleted}`;
     const cached = cacheGet(cacheKey);
     if (cached) { if (LOG_VERBOSE) console.log("🟡 Cache hit /orders"); return res.json(cached); }
 
@@ -3511,8 +3512,8 @@ app.get("/orders", async (req, res) => {
     }
 
     const ordersQuery = `
-      query GetOrders($first: Int!${after ? ', $after: String' : ''}${statusFilter ? ', $query: String!' : ''}) {
-        orders(first: $first${after ? ', after: $after' : ''}${statusFilter ? ', query: $query' : ''}, sortKey: CREATED_AT, reverse: true) {
+      query GetOrders($first: Int!${effectiveAfter ? ', $after: String' : ''}${statusFilter ? ', $query: String!' : ''}) {
+        orders(first: $first${effectiveAfter ? ', after: $after' : ''}${statusFilter ? ', query: $query' : ''}, sortKey: CREATED_AT, reverse: true) {
           edges {
             node {
               id
@@ -3611,8 +3612,7 @@ app.get("/orders", async (req, res) => {
 
     let orders;
     const variables = { first: pageSize };
-    
-    if (after) variables.after = after;
+    if (effectiveAfter) variables.after = effectiveAfter;
     if (statusFilter) variables.query = statusFilter.replace('query: "', '').replace('"', '');
 
     if (shouldPaginate) {
@@ -3621,6 +3621,7 @@ app.get("/orders", async (req, res) => {
     } else {
       const data = await graphqlClient.query(ordersQuery, variables);
       orders = data.data.orders.edges;
+      var pageInfo = data.data.orders.pageInfo;
     }
 
     // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
@@ -3747,12 +3748,13 @@ app.get("/orders", async (req, res) => {
     const response = {
       orders: resultOrders,
       count: resultOrders.length,
+      next_cursor: pageInfo && pageInfo.hasNextPage ? pageInfo.endCursor : null,
       pagination: shouldPaginate ? {
         total_fetched: transformedOrders.length,
         method: "full_pagination"
       } : {
         page_size: pageSize,
-        has_more: false // Would need pageInfo from single query to determine
+        has_more: pageInfo ? pageInfo.hasNextPage : false
       }
     };
 
