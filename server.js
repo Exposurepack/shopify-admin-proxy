@@ -2970,6 +2970,23 @@ app.post("/metafields", async (req, res) => {
 
     validateOrderGID(orderGID);
 
+    // Helper: invalidate caches after changes
+    const invalidateCachesForOrder = (gid) => {
+      try {
+        const legacyId = String(gid || '').split('/').pop().replace(/\D/g, '');
+        // Invalidate single-order cache
+        if (legacyId) {
+          __cache.delete(`order.${legacyId}`);
+        }
+        // Invalidate any orders list caches
+        for (const key of __cache.keys()) {
+          if (String(key).startsWith('orders.')) {
+            __cache.delete(key);
+          }
+        }
+      } catch (_) {}
+    };
+
     // Handle deletion when value is empty
     if (value === "" || value === null || value === undefined) {
       if (LOG_VERBOSE) console.log(`🗑️ Deleting metafield: ${namespace}.${key} for order ${orderGID}`);
@@ -2986,7 +3003,8 @@ app.post("/metafields", async (req, res) => {
       }
 
       const deletedMetafield = await metafieldManager.deleteMetafield(existingMetafield.id);
-      console.log(`✅ Metafield deleted: ${deletedMetafield.id}`);
+      if (LOG_VERBOSE) console.log(`✅ Metafield deleted: ${deletedMetafield.id}`);
+      invalidateCachesForOrder(orderGID);
       
       return res.json({ 
         success: true, 
@@ -2999,7 +3017,8 @@ app.post("/metafields", async (req, res) => {
     if (LOG_VERBOSE) console.log(`💾 Setting metafield: ${namespace}.${key}`);
     const metafield = await metafieldManager.setMetafield(orderGID, namespace, key, value, type);
     
-    console.log(`✅ Metafield set: ${metafield.id}`);
+    if (LOG_VERBOSE) console.log(`✅ Metafield set: ${metafield.id}`);
+    invalidateCachesForOrder(orderGID);
     res.json({ 
       success: true, 
       metafield: {
