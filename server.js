@@ -3644,6 +3644,7 @@ app.get("/orders", async (req, res) => {
     if (after) variables.after = after;
     if (statusFilter) variables.query = statusFilter.replace('query: "', '').replace('"', '');
 
+    let pageInfoForSingle = null;
     if (shouldPaginate) {
       if (LOG_VERBOSE) console.log("🔄 Using pagination to fetch all orders...");
       orders = await graphqlClient.queryWithPagination(ordersQuery, variables, pageSize);
@@ -3657,6 +3658,7 @@ app.get("/orders", async (req, res) => {
       }
       const data = await graphqlClient.query(ordersQuery, variables);
       orders = data.data.orders.edges;
+      pageInfoForSingle = data.data.orders.pageInfo || null;
     }
 
     // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
@@ -3783,6 +3785,9 @@ app.get("/orders", async (req, res) => {
     const response = {
       orders: resultOrders,
       count: resultOrders.length,
+      // Add cursor pagination hints for clients that iterate
+      next_cursor: (!shouldPaginate && pageInfoForSingle && pageInfoForSingle.hasNextPage) ? (pageInfoForSingle.endCursor || null) : null,
+      prev_cursor: (!shouldPaginate && pageInfoForSingle && pageInfoForSingle.hasPreviousPage) ? (pageInfoForSingle.startCursor || null) : null,
       pagination: shouldPaginate ? {
         total_fetched: transformedOrders.length,
         method: "full_pagination"
