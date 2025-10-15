@@ -3512,11 +3512,15 @@ app.get("/orders", async (req, res) => {
       limit = 50, 
       status = "any", 
       paginate = "false",
-      after,
+      after: afterRaw,
+      cursor: cursorRaw,
       financial_status,
       fulfillment_status,
       includeDeleted = "false"
     } = req.query;
+
+    // Accept both ?after= and ?cursor= (frontend may pass cursor)
+    const after = typeof afterRaw === 'string' && afterRaw.length ? afterRaw : (typeof cursorRaw === 'string' && cursorRaw.length ? cursorRaw : undefined);
 
     const pageSize = Math.min(parseInt(limit), 250); // Shopify max per page
     const shouldPaginate = paginate === "true";
