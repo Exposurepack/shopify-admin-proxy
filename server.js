@@ -3517,25 +3517,27 @@ app.get("/orders", async (req, res) => {
       fulfillment_status,
       includeDeleted = "false"
     } = req.query;
-    // Support legacy/front-end cursor param alias
-    const cursor = req.query.cursor;
-    const effectiveAfter = after || cursor || null;
 
     const pageSize = Math.min(parseInt(limit), 250); // Shopify max per page
     const shouldPaginate = paginate === "true";
 
-    // Build dynamic query filters (always include a status qualifier; default to status:any)
-    const queryParts = [];
-    if (status === "open") queryParts.push("status:open");
-    else if (status === "closed") queryParts.push("status:closed");
-    else queryParts.push("status:any");
-    if (financial_status) queryParts.push(`financial_status:${financial_status}`);
-    if (fulfillment_status) queryParts.push(`fulfillment_status:${fulfillment_status}`);
-    const queryString = queryParts.join(" AND ");
+    // Build dynamic query filters
+    let statusFilter = "";
+    if (status !== "any") {
+      statusFilter = `query: "${status === "open" ? "status:open" : "status:closed"}"`;
+    }
+
+    if (financial_status) {
+      statusFilter += statusFilter ? ` AND financial_status:${financial_status}` : `query: "financial_status:${financial_status}"`;
+    }
+
+    if (fulfillment_status) {
+      statusFilter += statusFilter ? ` AND fulfillment_status:${fulfillment_status}` : `query: "fulfillment_status:${fulfillment_status}"`;
+    }
 
     const ordersQuery = `
-      query GetOrders($first: Int!${effectiveAfter ? ', $after: String' : ''}, $query: String!) {
-        orders(first: $first${effectiveAfter ? ', after: $after' : ''}, sortKey: CREATED_AT, reverse: true, query: $query) {
+      query GetOrders($first: Int!${after ? ', $after: String' : ''}${statusFilter ? ', $query: String!' : ''}) {
+        orders(first: $first${after ? ', after: $after' : ''}${statusFilter ? ', query: $query' : ''}, sortKey: CREATED_AT, reverse: true) {
           edges {
             node {
               id
@@ -3633,30 +3635,24 @@ app.get("/orders", async (req, res) => {
     `;
 
     let orders;
-    const variables = { first: pageSize, query: queryString };
+    const variables = { first: pageSize };
     
-    if (effectiveAfter) variables.after = effectiveAfter;
+    if (after) variables.after = after;
+    if (statusFilter) variables.query = statusFilter.replace('query: "', '').replace('"', '');
 
     if (shouldPaginate) {
       if (LOG_VERBOSE) console.log("🔄 Using pagination to fetch all orders...");
       orders = await graphqlClient.queryWithPagination(ordersQuery, variables, pageSize);
     } else {
       // Cache list response for 60s keyed by variables
-      const cacheKey = `orders.${pageSize}.${effectiveAfter || 'start'}.${queryString || 'any'}.${financial_status || 'all'}.${fulfillment_status || 'all'}.${includeDeleted}`;
+      const cacheKey = `orders.${pageSize}.${after || 'start'}.${statusFilter || 'any'}.${financial_status || 'all'}.${fulfillment_status || 'all'}.${includeDeleted}`;
       const cached = __getCache(cacheKey);
       if (cached) {
         if (LOG_VERBOSE) console.log('📦 Cache hit for /orders');
         return res.json(cached);
       }
       const data = await graphqlClient.query(ordersQuery, variables);
-      const conn = data?.data?.orders;
-      orders = Array.isArray(conn?.edges) ? conn.edges : [];
-      // Expose cursors for front-end pagination helpers
-      var pageInfo = conn?.pageInfo;
-      var nextCursorOut = pageInfo?.hasNextPage ? pageInfo.endCursor : null;
-      var prevCursorOut = pageInfo?.hasPreviousPage ? pageInfo.startCursor : null;
-      // Attach for use in response later via closure variables
-      req.__pageInfo = { nextCursorOut, prevCursorOut };
+      orders = data.data.orders.edges;
     }
 
     // Fetch note_attributes for all orders via REST API (for business_name, customer_name, etc.)
@@ -3677,12 +3673,7 @@ app.get("/orders", async (req, res) => {
     }
 
     // Transform the data with smart naming
-    // Normalize to edges shape if queryWithPagination returned nodes
-    const edges = Array.isArray(orders)
-      ? (orders.length && orders[0] && orders[0].node ? orders : orders.map(n => ({ node: n })))
-      : [];
-
-    const transformedOrders = edges.map(({ node }) => {
+    const transformedOrders = orders.map(({ node }) => {
       const metafields = {};
       node.metafields.edges.forEach((mf) => {
         metafields[mf.node.key] = mf.node.value;
@@ -3794,9 +3785,7 @@ app.get("/orders", async (req, res) => {
       } : {
         page_size: pageSize,
         has_more: false // Would need pageInfo from single query to determine
-      },
-      next_cursor: req.__pageInfo?.nextCursorOut || null,
-      prev_cursor: req.__pageInfo?.prevCursorOut || null
+      }
     };
 
     if (LOG_VERBOSE) console.log(`🟢 ${response.count}/${transformedOrders.length} orders loaded.${includeDeletedBool ? " (including deleted)" : ""}`);
