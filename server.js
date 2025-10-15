@@ -3541,7 +3541,6 @@ app.get("/orders", async (req, res) => {
               id
               legacyResourceId
               name
-              orderNumber
               createdAt
               updatedAt
               tags
@@ -3717,7 +3716,6 @@ app.get("/orders", async (req, res) => {
         id: node.id,
         legacy_id: node.legacyResourceId,
         name: node.name,
-        order_number: node.orderNumber,
         created_at: node.createdAt,
         updated_at: node.updatedAt,
         financial_status: node.displayFinancialStatus,
