@@ -3509,7 +3509,7 @@ app.get("/orders", async (req, res) => {
     if (LOG_VERBOSE) console.log("📋 Fetching orders with enhanced pagination...");
 
     const { 
-      limit = 50, 
+      limit = 100, 
       status = "any", 
       paginate = "false",
       after: afterRaw,
@@ -3537,6 +3537,11 @@ app.get("/orders", async (req, res) => {
 
     if (fulfillment_status) {
       statusFilter += statusFilter ? ` AND fulfillment_status:${fulfillment_status}` : `query: "fulfillment_status:${fulfillment_status}"`;
+    }
+
+    // Ensure we explicitly include all statuses when none specified
+    if (!statusFilter) {
+      statusFilter = `query: "status:any"`;
     }
 
     const ordersQuery = `
