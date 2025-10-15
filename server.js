@@ -3650,9 +3650,10 @@ app.get("/orders", async (req, res) => {
         return res.json(cached);
       }
       const data = await graphqlClient.query(ordersQuery, variables);
-      orders = data.data.orders.edges;
+      const conn = data?.data?.orders;
+      orders = Array.isArray(conn?.edges) ? conn.edges : [];
       // Expose cursors for front-end pagination helpers
-      var pageInfo = data.data.orders.pageInfo;
+      var pageInfo = conn?.pageInfo;
       var nextCursorOut = pageInfo?.hasNextPage ? pageInfo.endCursor : null;
       var prevCursorOut = pageInfo?.hasPreviousPage ? pageInfo.startCursor : null;
       // Attach for use in response later via closure variables
@@ -3677,7 +3678,12 @@ app.get("/orders", async (req, res) => {
     }
 
     // Transform the data with smart naming
-    const transformedOrders = orders.map(({ node }) => {
+    // Normalize to edges shape if queryWithPagination returned nodes
+    const edges = Array.isArray(orders)
+      ? (orders.length && orders[0] && orders[0].node ? orders : orders.map(n => ({ node: n })))
+      : [];
+
+    const transformedOrders = edges.map(({ node }) => {
       const metafields = {};
       node.metafields.edges.forEach((mf) => {
         metafields[mf.node.key] = mf.node.value;
