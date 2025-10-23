@@ -4206,6 +4206,19 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
     const created = [];
     const supplierKeys = Object.keys(normalisedAllocations).filter(k => Array.isArray(normalisedAllocations[k]) && normalisedAllocations[k].length > 0);
 
+    // Prepare values for proportional allocation of shipping and tax
+    const originalShippingLines = Array.isArray(originalOrder.shipping_lines) ? originalOrder.shipping_lines : [];
+    const nonSharedItems = allLineItems.filter(li => {
+      const title = li?.title;
+      const name = li?.name;
+      return !(isSharedTitle(title) || isSharedTitle(name));
+    });
+    const originalItemsSubtotal = nonSharedItems.reduce((sum, li) => {
+      const price = parseFloat(li?.price || 0);
+      const qty = Number(li?.quantity || 1);
+      return sum + (isFinite(price) ? price : 0) * qty;
+    }, 0);
+
     if (supplierKeys.length === 0) {
       return res.status(400).json({ error: "No supplier allocations provided" });
     }
@@ -4226,6 +4239,46 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
         // Skip creating empty orders for this supplier
         continue;
       }
+
+      // Compute proportional ratio for this split based on non-shared item subtotal
+      const supplierItemsSubtotal = supplierItems.reduce((sum, li) => {
+        const price = parseFloat(li?.price || 0);
+        const qty = Number(li?.quantity || 1);
+        return sum + (isFinite(price) ? price : 0) * qty;
+      }, 0);
+      const splitsCount = supplierKeys.length || 1;
+      let allocationRatio = 0;
+      if (originalItemsSubtotal > 0) {
+        allocationRatio = supplierItemsSubtotal / originalItemsSubtotal;
+      } else {
+        allocationRatio = 1 / splitsCount; // fallback even split when original subtotal is 0
+      }
+      if (!isFinite(allocationRatio) || allocationRatio < 0) allocationRatio = 0;
+      if (allocationRatio > 1) allocationRatio = 1;
+
+      // Build shipping_lines carried over proportionally from original order
+      const newShippingLines = originalShippingLines.map(sl => {
+        const priceNum = parseFloat(sl?.price || 0);
+        const price = (isFinite(priceNum) ? (priceNum * allocationRatio) : 0).toFixed(2);
+        const line = {
+          title: sl?.title || 'Shipping',
+          price: String(price)
+        };
+        if (sl?.code) line.code = sl.code;
+        if (sl?.source) line.source = sl.source;
+        if (sl?.carrier_identifier) line.carrier_identifier = sl.carrier_identifier;
+        return line;
+      });
+
+      // Build tax_lines proportionally if present on original order
+      const originalTaxLines = Array.isArray(originalOrder.tax_lines) ? originalOrder.tax_lines : [];
+      const newTaxLines = originalTaxLines.map(tl => {
+        const priceNum = parseFloat(tl?.price || 0);
+        const price = (isFinite(priceNum) ? (priceNum * allocationRatio) : 0).toFixed(2);
+        const line = { title: tl?.title || 'Tax', price: String(price) };
+        if (tl?.rate != null) line.rate = tl.rate;
+        return line;
+      });
 
       // Copy customer, addresses, tags, and set linking metadata
       const customer = originalOrder.customer?.id ? { id: originalOrder.customer.id } : undefined;
@@ -4253,6 +4306,11 @@ app.post("/orders/:id/split", authenticate, async (req, res) => {
           ...(customer ? { customer } : { email: originalOrder.email }),
           billing_address,
           shipping_address,
+          // Carry over shipping and tax where possible
+          ...(newShippingLines.length > 0 ? { shipping_lines: newShippingLines } : {}),
+          ...(originalOrder.taxes_included != null ? { taxes_included: originalOrder.taxes_included } : {}),
+          ...(originalOrder.tax_exempt != null ? { tax_exempt: originalOrder.tax_exempt } : {}),
+          ...(newTaxLines.length > 0 ? { tax_lines: newTaxLines } : {}),
           // Keep financial status in sync with original order
           ...(originalOrder.financial_status ? { financial_status: originalOrder.financial_status } : {}),
           // Copy currency if available
