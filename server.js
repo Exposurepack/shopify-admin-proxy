@@ -1,5 +1,6 @@
 import express from "express";
 import axios from "axios";
+import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
 import multer from "multer";
@@ -4053,6 +4054,47 @@ app.get("/rest/orders/:id", async (req, res) => {
     res.json(orderData);
   } catch (error) {
     handleError(error, res, "REST order fetch failed");
+  }
+});
+
+/**
+ * Proxy artwork files to force inline preview (e.g., PDF from Shopify CDN)
+ * Usage: /proxy-artwork?url=https%3A%2F%2Fcdn.shopify.com%2F...
+ */
+app.get("/proxy-artwork", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).send('Missing url');
+    }
+    let parsed;
+    try { parsed = new URL(url); } catch { return res.status(400).send('Invalid url'); }
+    const host = parsed.hostname.toLowerCase();
+    const allowedHosts = [
+      'cdn.shopify.com',
+      'files.shopifycdn.net',
+      'cdn.shopifycdn.net'
+    ];
+    if (!allowedHosts.some(h => host === h || host.endsWith('.' + h))) {
+      return res.status(403).send('Host not allowed');
+    }
+
+    const upstream = await axios.get(parsed.toString(), { responseType: 'stream' });
+    const ct = upstream.headers['content-type'] || (parsed.pathname.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+    const filename = path.basename(parsed.pathname) || 'file';
+    res.setHeader('Content-Type', ct);
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    upstream.data.on('error', (e) => {
+      console.error('Proxy stream error:', e?.message);
+      if (!res.headersSent) res.status(502).end('Upstream error');
+    });
+    upstream.data.pipe(res);
+  } catch (e) {
+    console.error('Proxy error:', e?.message);
+    if (!res.headersSent) res.status(500).send('Proxy failed');
   }
 });
 
