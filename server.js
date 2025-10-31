@@ -3878,6 +3878,7 @@ app.get("/orders/:id", async (req, res) => {
           lineItems(first: 50) {
             edges {
               node {
+                id
                 title
                 quantity
                 sku
@@ -3947,7 +3948,8 @@ app.get("/orders/:id", async (req, res) => {
       metafields[mf.node.key] = mf.node.value; 
     });
 
-    const lineItems = node.lineItems.edges.map((item) => ({
+    const lineItemsGraph = node.lineItems.edges.map((item) => ({
+      id: item.node.id,
       title: item.node.title,
       quantity: item.node.quantity,
       sku: item.node.sku,
@@ -3964,11 +3966,29 @@ app.get("/orders/:id", async (req, res) => {
 
     // Fetch note_attributes via REST for compatibility
     let noteAttributes = {};
+    let restLineItems = null;
     try {
       const restOrder = await restClient.get(`/orders/${legacyId}.json`);
       restOrder.order.note_attributes.forEach((na) => {
         noteAttributes[na.name] = na.value;
       });
+      // Prefer REST line_items to capture properties and raw variant/title name
+      if (Array.isArray(restOrder.order.line_items)) {
+        restLineItems = restOrder.order.line_items.map((li) => ({
+          id: li.id ? `gid://shopify/LineItem/${li.id}` : undefined,
+          title: li.title,
+          quantity: li.quantity,
+          sku: li.sku,
+          variantTitle: li.variant_title,
+          vendor: li.vendor,
+          name: li.name,
+          properties: li.properties || {},
+          unit_price: li.price,
+          line_price: li.line_price,
+          original_unit_price: li.price,
+          original_line_price: li.line_price,
+        }));
+      }
       if (LOG_VERBOSE) console.log(`✅ Fetched note_attributes for order ${legacyId}:`, Object.keys(noteAttributes));
     } catch (restError) {
       if (LOG_VERBOSE) console.warn("⚠️ Could not fetch note_attributes via REST:", restError.message);
@@ -3977,6 +3997,10 @@ app.get("/orders/:id", async (req, res) => {
     // Smart naming logic - prioritize attributes over default names
     const businessName = noteAttributes.business_name || noteAttributes.company_name || node.shippingAddress?.company || node.customer?.displayName || 'Unknown';
     const customerName = noteAttributes.customer_name || node.customer?.displayName || noteAttributes.business_name || 'Unknown Customer';
+
+    const line_items = Array.isArray(restLineItems) && restLineItems.length > 0
+      ? restLineItems
+      : lineItemsGraph;
 
     const orderData = {
       id: node.id,
@@ -4005,7 +4029,7 @@ app.get("/orders/:id", async (req, res) => {
       // Smart display names (prioritizes custom attributes)
       display_business_name: businessName,
       display_customer_name: customerName,
-      line_items: lineItems,
+      line_items,
     };
 
     if (LOG_VERBOSE) console.log(`🟢 Order loaded: ${node.name} (${legacyId}).`);
