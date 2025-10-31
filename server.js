@@ -4062,6 +4062,8 @@ app.get("/rest/orders/:id", async (req, res) => {
  * Proxy artwork files to force inline preview (e.g., PDF from Shopify CDN)
  * Usage: /proxy-artwork?url=https%3A%2F%2Fcdn.shopify.com%2F...
  */
+// Place before authenticate? No, authenticate is already applied globally above;
+// But some clients (e.g., iframe fetchers) cannot set custom headers. We keep proxy for XHR only.
 app.get("/proxy-artwork", async (req, res) => {
   try {
     const { url } = req.query;
