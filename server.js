@@ -68,8 +68,9 @@ app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false, // Allow for API usage
-  crossOriginEmbedderPolicy: false
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  frameguard: false // allow embedding resources (PDF preview in iframe)
 }));
 
 // Rate limiting
@@ -4086,6 +4087,8 @@ app.get("/proxy-artwork", async (req, res) => {
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.setHeader('Cache-Control', 'private, max-age=600');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('X-Frame-Options', '');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     upstream.data.on('error', (e) => {
       console.error('Proxy stream error:', e?.message);
