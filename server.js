@@ -6010,7 +6010,12 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
   }
 });
 
-/**
+// Start server
+app.listen(PORT, () => {
+  console.log("✅ ===============================================");
+  console.log(`✅ Shopify Admin Proxy Server v2.0.0`);
+  console.log(`✅ Running at: http://localhost:${PORT}`);
+  console.log(`✅ Store: ${SHOPIFY_STORE_URL}`);
   console.log(`✅ API Version: ${SHOPIFY_API_VERSION}`);
   console.log(`✅ Environment: ${NODE_ENV}`);
   console.log(`✅ HubSpot Integration: ${hubspotClient ? 'Enabled' : 'Disabled'}`);
@@ -6030,5 +6035,8 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
   console.log("   📮 PUT  /orders/:id/shipping-address - Update order shipping address");
+  console.log("   💰 GET  /wholesale-profit-data - Wholesale profit intelligence");
+  console.log("   💾 POST /wholesale/actuals/bulk-save - Save wholesale actuals");
+  console.log("   📥 GET  /wholesale-profit-export-csv - Export wholesale CSV");
   console.log("✅ ===============================================");
 }); 
