@@ -5632,19 +5632,12 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
     
     // Fetch all closed-won deals (already filtered by getDealsForAnalytics)
     const allDeals = await hubspotClient.getDealsForAnalytics(dateRange);
-
-    // Lightweight pre-filter: only deals whose name suggests wholesale
-    const wholesaleDeals = allDeals.filter(d => {
-      const name = (d.properties?.dealname || '').toLowerCase();
-      return name.includes('wholesale');
-    });
-
-    console.log(`📊 Pre-filtered to ${wholesaleDeals.length} wholesale-ish deals from ${allDeals.length} total`);
+    console.log(`📊 Processing ${allDeals.length} deals for wholesale invoices...`);
 
     const wholesaleJobs = [];
     
     // Process each deal and fetch its invoices + invoice line items
-    for (const deal of wholesaleDeals) {
+    for (const deal of allDeals) {
       const dealId = deal.id;
       const props = deal.properties || {};
       
@@ -5668,9 +5661,17 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         }
 
         // Filter by invoice payment status: PAID or PARTIALLY PAID only
-        const statusRaw = (invoiceObj?.properties?.hs_status || '').toString().toLowerCase();
-        if (statusRaw && !(statusRaw.includes('paid'))) {
-          console.log(`ℹ️ Deal ${dealId} invoice status '${statusRaw}' is not paid/partially paid, skipping`);
+        const statusRaw = (invoiceObj?.properties?.hs_status || '').toString().toLowerCase().trim();
+        if (!statusRaw) {
+          console.log(`ℹ️ Deal ${dealId} invoice has no status, skipping (requires PAID or PARTIALLY PAID)`);
+          continue;
+        }
+
+        const isPaid = statusRaw === 'paid';
+        const isPartial = statusRaw === 'partially_paid' || statusRaw === 'partial' || statusRaw.includes('partial');
+
+        if (!(isPaid || isPartial)) {
+          console.log(`ℹ️ Deal ${dealId} invoice status '${statusRaw}' is not PAID/PARTIALLY PAID, skipping`);
           continue;
         }
 
