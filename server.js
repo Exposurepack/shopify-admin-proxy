@@ -5600,7 +5600,243 @@ function saveActualsDB() {
 }
 
 /**
- * Helper: Fetch HubSpot invoices with wholesale line items
+ * Helper: Fetch HubSpot invoices with wholesale line items (streaming version)
+ * Calls onJobFound callback for each job as it's processed
+ */
+async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound = null) {
+  try {
+    if (!hubspotClient) {
+      throw new Error('HubSpot client not initialized');
+    }
+
+    // 1) Fetch all closed-won deals (already filtered by getDealsForAnalytics)
+    const allDeals = await hubspotClient.getDealsForAnalytics(dateRange);
+
+    const wholesaleJobs = [];
+
+    // Process each deal and fetch its invoices + invoice line items
+    for (const deal of allDeals) {
+      const dealId = deal.id;
+      const props = deal.properties || {};
+
+      try {
+        // 2) Call hubspotClient.getDealInvoices(dealId) and normalise result
+        const invoiceData = await hubspotClient.getDealInvoices(dealId);
+
+        let invoiceObj = null;
+        let invoiceLineItems = [];
+
+        if (!invoiceData) {
+          continue;
+        }
+
+        if (Array.isArray(invoiceData)) {
+          // Old format: just line items
+          invoiceLineItems = invoiceData;
+        } else {
+          // New structured format
+          invoiceObj = invoiceData.invoice || null;
+          invoiceLineItems = invoiceData.lineItems || [];
+        }
+
+        if (!invoiceObj) {
+          continue;
+        }
+
+        // Get invoice status (do NOT filter by status for now)
+        const rawStatus = (
+          invoiceObj?.properties?.hs_status ||
+          invoiceObj?.properties?.hs_invoice_status ||
+          invoiceObj?.properties?.hs_payment_status ||
+          ''
+        )
+          .toString()
+          .toLowerCase()
+          .trim();
+
+        // 5) Simple wholesale rule:
+        //    - any invoice that has a plate line item, OR
+        //    - any invoice that has a 10k+ line item (quantity >= 10,000 OR name/description contains "10k"/"10000")
+        const hasPlateLineItem = invoiceLineItems.some(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          return (
+            name.includes('plate') ||
+            description.includes('plate')
+          );
+        });
+
+        const hasTenKLineItem = invoiceLineItems.some(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          const qty = parseInt(item.properties?.quantity || 0, 10);
+
+          const textLooksTenK =
+            name.includes('10k') ||
+            description.includes('10k') ||
+            name.includes('10000') ||
+            description.includes('10000');
+
+          return qty >= 10000 || textLooksTenK;
+        });
+
+        if (!(hasPlateLineItem || hasTenKLineItem)) {
+          continue;
+        }
+
+        // Cup items: everything that's not a plate and not shipping
+        const cupItems = invoiceLineItems.filter(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          const isPlate =
+            name.includes('plate') ||
+            description.includes('plate');
+          const isShipping =
+            name.includes('shipping') ||
+            description.includes('shipping');
+          return !isPlate && !isShipping;
+        });
+
+        // 6) Revenue calculations from invoice line items
+        const cupsRevenue = cupItems.reduce((sum, item) => {
+          const quantity = parseInt(item.properties?.quantity || 0, 10);
+          const price = parseFloat(item.properties?.price || 0);
+          return sum + quantity * price;
+        }, 0);
+
+        const shippingItem = invoiceLineItems.find(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          return name.includes('shipping') || description.includes('shipping');
+        });
+
+        const shippingCharged = shippingItem
+          ? parseFloat(shippingItem.properties?.amount || 0)
+          : 0;
+
+        const totalRevenue = invoiceLineItems.reduce((sum, item) => {
+          return sum + parseFloat(item.properties?.amount || 0);
+        }, 0);
+
+        const totalRevenueExGST = totalRevenue / 1.1;
+
+        // 7) Customer info from invoice
+        const customerName =
+          invoiceObj?.properties?.hs_customer_name ||
+          invoiceObj?.properties?.hs_billing_name ||
+          invoiceObj?.properties?.hs_name ||
+          props.dealname ||
+          'Unknown';
+
+        const businessName =
+          invoiceObj?.properties?.hs_company_name ||
+          invoiceObj?.properties?.hs_business_name ||
+          invoiceObj?.properties?.company_name ||
+          'Unknown';
+
+        // Get actuals from database (simplified 3-field model)
+        const actuals = wholesaleActualsDB[dealId] || {
+          supplier_total_cost_ex_gst: 0,
+          actual_freight_cost_ex_gst: 0,
+          over_under_cost_adjustment: 0,
+          shipping_charged_to_customer: shippingCharged,
+          notes: ''
+        };
+
+        const job = {
+          hubspot_deal_id: dealId,
+          deal_name: props.dealname || 'Untitled Deal',
+          customer: customerName,
+          business_name: businessName,
+          date: props.closedate || props.createdate,
+          stage: props.dealstage,
+
+          // Revenue breakdown
+          cups_revenue_ex_gst: cupsRevenue / 1.1,
+          shipping_revenue: shippingCharged,
+          total_revenue_ex_gst: totalRevenueExGST,
+          total_revenue_inc_gst: totalRevenue,
+          currency: invoiceObj?.properties?.hs_currency || 'AUD',
+
+          // Wholesale invoice line items
+          line_items: cupItems.map(item => ({
+            name: item.properties?.name || '',
+            description: item.properties?.description || '',
+            quantity: parseInt(item.properties?.quantity || 0, 10),
+            price: parseFloat(item.properties?.price || 0),
+            amount: parseFloat(item.properties?.amount || 0),
+            sku: item.properties?.hs_sku || '',
+          })),
+
+          // Single primary invoice
+          invoices: [
+            {
+              id: invoiceObj.id || invoiceObj.properties?.hs_object_id || dealId,
+              number: invoiceObj.properties?.hs_invoice_number || '',
+              amount: parseFloat(invoiceObj.properties?.hs_amount_billed || 0),
+              status: rawStatus,
+            }
+          ],
+
+          // Actuals (from DB)
+          actuals
+        };
+
+        // Calculated fields - simplified cost model
+        const totalActualCost =
+          actuals.supplier_total_cost_ex_gst +
+          actuals.actual_freight_cost_ex_gst +
+          actuals.over_under_cost_adjustment;
+
+        const cupsRevEx = job.cups_revenue_ex_gst || 0;
+        const profit = job.total_revenue_ex_gst - totalActualCost;
+
+        job.calculated = {
+          total_actual_cost: totalActualCost,
+          profit: profit,
+          overall_gp_percent:
+            job.total_revenue_ex_gst > 0
+              ? (profit / job.total_revenue_ex_gst) * 100
+              : 0,
+          shipping_gp_percent:
+            actuals.shipping_charged_to_customer > 0 && actuals.actual_freight_cost_ex_gst > 0
+              ? ((actuals.shipping_charged_to_customer - actuals.actual_freight_cost_ex_gst) /
+                  actuals.shipping_charged_to_customer) * 100
+              : 0,
+          cups_gp_percent:
+            cupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
+              ? ((cupsRevEx - actuals.supplier_total_cost_ex_gst) / cupsRevEx) * 100
+              : 0
+        };
+
+        wholesaleJobs.push(job);
+        
+        // Stream this job immediately if callback provided
+        if (onJobFound && typeof onJobFound === 'function') {
+          onJobFound(job);
+        }
+
+      } catch (err) {
+        console.warn(`⚠️ Error processing deal ${dealId}:`, err.message);
+      }
+    }
+
+    // Sort by date descending
+    wholesaleJobs.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    console.log(
+      `✅ Found ${wholesaleJobs.length} wholesale jobs from HubSpot after invoice filtering`
+    );
+    return wholesaleJobs;
+
+  } catch (error) {
+    console.error('❌ Error fetching wholesale merged data:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Helper: Fetch HubSpot invoices with wholesale line items (non-streaming version)
  * Returns HubSpot deals/invoices containing "wholesale" in line items
  */
 async function getWholesaleHubSpotInvoices(dateRange = null) {
@@ -5879,6 +6115,42 @@ function calculateWholesaleSummary(jobs) {
     jobsWithActuals
   };
 }
+
+/**
+ * GET /wholesale-profit-data/stream
+ * Streams wholesale jobs as they're processed (Server-Sent Events)
+ */
+app.get('/wholesale-profit-data/stream', async (req, res) => {
+  try {
+    // Set up SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const dateRange = req.query.startDate && req.query.endDate ? {
+      startDate: req.query.startDate,
+      endDate: req.query.endDate
+    } : null;
+
+    let jobCount = 0;
+
+    // Stream each job as it's found
+    await getWholesaleHubSpotInvoicesStreaming(dateRange, (job) => {
+      jobCount++;
+      res.write(`data: ${JSON.stringify({ type: 'job', job })}\n\n`);
+    });
+
+    // Send completion message
+    res.write(`data: ${JSON.stringify({ type: 'complete', count: jobCount })}\n\n`);
+    res.end();
+
+  } catch (error) {
+    console.error('❌ Wholesale profit stream error:', error.message);
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+    res.end();
+  }
+});
 
 /**
  * GET /wholesale-profit-data
