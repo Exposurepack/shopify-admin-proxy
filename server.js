@@ -6043,49 +6043,85 @@ async function getAllWholesaleInvoices(dateRange = null) {
     console.log(`✅ Part 2 complete: Found ${standaloneCount} standalone wholesale invoices (scanned ${totalInvoices} total invoices)`);
 
     // ========================================
-    // PART 3: Reorder Analysis
+    // PART 3: Enhanced Multi-Level Reorder Analysis
     // ========================================
-    console.log('🔄 Analyzing reorders by contact...');
+    console.log('🔄 Analyzing reorders by contact, email, and business...');
 
     const contactOrderMap = new Map();
+    const emailOrderMap = new Map();
+    const businessOrderMap = new Map();
 
+    // Step 1: Group by Contact ID (strongest match)
     wholesaleJobs.forEach(job => {
       if (job.hubspot_contact_id) {
         if (!contactOrderMap.has(job.hubspot_contact_id)) {
           contactOrderMap.set(job.hubspot_contact_id, []);
         }
         contactOrderMap.get(job.hubspot_contact_id).push(job);
-      } else if (job.contact_email) {
-        const emailKey = `email:${job.contact_email}`;
-        if (!contactOrderMap.has(emailKey)) {
-          contactOrderMap.set(emailKey, []);
+      }
+    });
+
+    // Step 2: Group by Email (medium strength) - only if no contact ID
+    wholesaleJobs.forEach(job => {
+      if (job.contact_email && !job.hubspot_contact_id) {
+        const emailKey = job.contact_email.toLowerCase().trim();
+        if (!emailOrderMap.has(emailKey)) {
+          emailOrderMap.set(emailKey, []);
         }
-        contactOrderMap.get(emailKey).push(job);
+        emailOrderMap.get(emailKey).push(job);
       }
     });
 
-    contactOrderMap.forEach((jobs, contactKey) => {
-      if (jobs.length > 1) {
-        jobs.sort((a, b) => new Date(a.date) - new Date(b.date));
-        
-        jobs.forEach((job, index) => {
-          job.is_reorder = index > 0;
-          job.order_number_for_contact = index + 1;
-          job.total_orders_for_contact = jobs.length;
-        });
-        
-        console.log(`   🔄 Contact ${contactKey}: ${jobs.length} orders (reorder customer)`);
-      } else {
-        jobs[0].is_reorder = false;
-        jobs[0].order_number_for_contact = 1;
-        jobs[0].total_orders_for_contact = 1;
+    // Step 3: Group by Business Name (company-level reorders) - only if no contact or email
+    wholesaleJobs.forEach(job => {
+      if (job.business_name && 
+          job.business_name !== 'Unknown' && 
+          !job.hubspot_contact_id && 
+          !job.contact_email) {
+        const businessKey = job.business_name.toLowerCase().trim();
+        if (!businessOrderMap.has(businessKey)) {
+          businessOrderMap.set(businessKey, []);
+        }
+        businessOrderMap.get(businessKey).push(job);
       }
     });
 
-    const reorderCount = Array.from(contactOrderMap.values()).filter(jobs => jobs.length > 1).length;
-    const firstTimeCount = Array.from(contactOrderMap.values()).filter(jobs => jobs.length === 1).length;
+    // Process all three maps and mark reorders
+    const allMaps = [
+      { map: contactOrderMap, type: 'contact', label: 'CONTACT' },
+      { map: emailOrderMap, type: 'email', label: 'EMAIL' },
+      { map: businessOrderMap, type: 'business', label: 'BUSINESS' }
+    ];
 
-    console.log(`✅ Reorder analysis complete: ${reorderCount} repeat customers, ${firstTimeCount} first-time customers`);
+    let totalReorderCustomers = 0;
+    let totalFirstTimeCustomers = 0;
+
+    allMaps.forEach(({ map, type, label }) => {
+      map.forEach((jobs, key) => {
+        if (jobs.length > 1) {
+          // Sort by date to determine order sequence
+          jobs.sort((a, b) => new Date(a.date) - new Date(b.date));
+          
+          jobs.forEach((job, index) => {
+            job.is_reorder = index > 0;
+            job.order_number_for_contact = index + 1;
+            job.total_orders_for_contact = jobs.length;
+            job.reorder_match_type = type; // 'contact', 'email', or 'business'
+          });
+          
+          totalReorderCustomers++;
+          console.log(`   🔄 ${label} "${key}": ${jobs.length} orders (${type} match)`);
+        } else {
+          jobs[0].is_reorder = false;
+          jobs[0].order_number_for_contact = 1;
+          jobs[0].total_orders_for_contact = 1;
+          jobs[0].reorder_match_type = null;
+          totalFirstTimeCustomers++;
+        }
+      });
+    });
+
+    console.log(`✅ Reorder analysis complete: ${totalReorderCustomers} repeat customers, ${totalFirstTimeCustomers} first-time customers`);
     console.log(`🎯 TOTAL: ${wholesaleJobs.length} wholesale invoices (${wholesaleJobs.length - standaloneCount} from deals + ${standaloneCount} standalone)`);
 
     return wholesaleJobs;
@@ -6659,16 +6695,20 @@ app.get('/wholesale-profit-data/stream', async (req, res) => {
       endDate: req.query.endDate
     } : null;
 
-    let jobCount = 0;
+    console.log('🌊 Starting wholesale data stream (hybrid approach)...');
 
-    // Stream each job as it's found
-    await getWholesaleHubSpotInvoicesStreaming(dateRange, (job) => {
-      jobCount++;
+    // USE HYBRID APPROACH: Fetch all invoices (from deals + standalone)
+    const jobs = await getAllWholesaleInvoices(dateRange);
+    
+    console.log(`✅ Fetched ${jobs.length} wholesale jobs, streaming to client...`);
+
+    // Stream each job
+    jobs.forEach((job) => {
       res.write(`data: ${JSON.stringify({ type: 'job', job })}\n\n`);
     });
 
     // Send completion message
-    res.write(`data: ${JSON.stringify({ type: 'complete', count: jobCount })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'complete', count: jobs.length })}\n\n`);
     res.end();
 
   } catch (error) {
