@@ -5794,16 +5794,12 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           props.dealname ||
           'Unknown';
 
-        // Get actuals from database (keep existing logic)
+        // Get actuals from database (simplified 3-field model)
         const actuals = wholesaleActualsDB[dealId] || {
-          actual_shipping_cost: 0,
+          supplier_total_cost_ex_gst: 0,
+          actual_freight_cost_ex_gst: 0,
+          over_under_cost_adjustment: 0,
           shipping_charged_to_customer: shippingCharged,
-          plate_fee_cost: 0,
-          cups_cogs_total: 0,
-          overprint_percent: 0,
-          overprint_cost: 0,
-          underprint_percent: 0,
-          underprint_refund_amount: 0,
           notes: ''
         };
 
@@ -5846,26 +5842,30 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           actuals
         };
 
-        // Calculated fields (keep GP logic)
+        // Calculated fields - simplified cost model
         const totalActualCost =
-          actuals.actual_shipping_cost +
-          actuals.plate_fee_cost +
-          actuals.cups_cogs_total +
-          actuals.overprint_cost -
-          actuals.underprint_refund_amount;
+          actuals.supplier_total_cost_ex_gst +
+          actuals.actual_freight_cost_ex_gst +
+          actuals.over_under_cost_adjustment;
 
         const cupsRevEx = job.cups_revenue_ex_gst || 0;
+        const profit = job.total_revenue_ex_gst - totalActualCost;
 
         job.calculated = {
           total_actual_cost: totalActualCost,
+          profit: profit,
+          overall_gp_percent:
+            job.total_revenue_ex_gst > 0
+              ? (profit / job.total_revenue_ex_gst) * 100
+              : 0,
           shipping_gp_percent:
-            actuals.shipping_charged_to_customer > 0
-              ? ((actuals.shipping_charged_to_customer - actuals.actual_shipping_cost) /
+            actuals.shipping_charged_to_customer > 0 && actuals.actual_freight_cost_ex_gst > 0
+              ? ((actuals.shipping_charged_to_customer - actuals.actual_freight_cost_ex_gst) /
                   actuals.shipping_charged_to_customer) * 100
               : 0,
           cups_gp_percent:
-            cupsRevEx > 0
-              ? ((cupsRevEx - actuals.cups_cogs_total) / cupsRevEx) * 100
+            cupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
+              ? ((cupsRevEx - actuals.supplier_total_cost_ex_gst) / cupsRevEx) * 100
               : 0
         };
 
@@ -6044,23 +6044,19 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
     
     const jobs = await getWholesaleHubSpotInvoices();
     
-    // Build CSV
+    // Build CSV - simplified 3-field cost model
     const headers = [
       'Date',
       'Deal ID',
       'Deal Name',
       'Customer',
+      'Business Name',
       'Cups Revenue (Ex GST)',
       'Shipping Revenue',
       'Total Revenue (Ex GST)',
-      'Actual Shipping Cost',
-      'Shipping Charged',
-      'Plate Fee Cost',
-      'Cups COGS',
-      'Overprint %',
-      'Overprint Cost',
-      'Underprint %',
-      'Underprint Refund',
+      'Supplier Total Cost (Ex GST)',
+      'Actual Freight Cost (Ex GST)',
+      'Over/Under Adjustment (Ex GST)',
       'Total Actual Cost',
       'Profit',
       'Overall GP %',
@@ -6078,22 +6074,18 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
         job.hubspot_deal_id,
         job.deal_name,
         job.customer,
-        job.cups_revenue_ex_gst.toFixed(2),
-        job.shipping_revenue.toFixed(2),
-        job.total_revenue_ex_gst.toFixed(2),
-        actuals.actual_shipping_cost.toFixed(2),
-        actuals.shipping_charged_to_customer.toFixed(2),
-        actuals.plate_fee_cost.toFixed(2),
-        actuals.cups_cogs_total.toFixed(2),
-        actuals.overprint_percent.toFixed(2),
-        actuals.overprint_cost.toFixed(2),
-        actuals.underprint_percent.toFixed(2),
-        actuals.underprint_refund_amount.toFixed(2),
-        calc.total_actual_cost.toFixed(2),
-        calc.profit.toFixed(2),
-        calc.overall_gp_percent.toFixed(2),
-        calc.cups_gp_percent.toFixed(2),
-        calc.shipping_gp_percent.toFixed(2),
+        job.business_name || '',
+        (job.cups_revenue_ex_gst || 0).toFixed(2),
+        (job.shipping_revenue || 0).toFixed(2),
+        (job.total_revenue_ex_gst || 0).toFixed(2),
+        (actuals.supplier_total_cost_ex_gst || 0).toFixed(2),
+        (actuals.actual_freight_cost_ex_gst || 0).toFixed(2),
+        (actuals.over_under_cost_adjustment || 0).toFixed(2),
+        (calc.total_actual_cost || 0).toFixed(2),
+        (calc.profit || 0).toFixed(2),
+        (calc.overall_gp_percent || 0).toFixed(2),
+        (calc.cups_gp_percent || 0).toFixed(2),
+        (calc.shipping_gp_percent || 0).toFixed(2),
         actuals.notes || ''
       ];
     });
