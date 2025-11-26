@@ -5630,49 +5630,94 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
     
     console.log('📊 Fetching HubSpot deals for wholesale report...');
     
-    // Fetch all HubSpot deals
+    // Fetch all closed-won deals (already filtered by getDealsForAnalytics)
     const allDeals = await hubspotClient.getDealsForAnalytics(dateRange);
+
+    // Lightweight pre-filter: only deals whose name suggests wholesale
+    const wholesaleDeals = allDeals.filter(d => {
+      const name = (d.properties?.dealname || '').toLowerCase();
+      return name.includes('wholesale');
+    });
+
+    console.log(`📊 Pre-filtered to ${wholesaleDeals.length} wholesale-ish deals from ${allDeals.length} total`);
+
     const wholesaleJobs = [];
     
-    // Process each deal and fetch its invoices + line items
-    for (const deal of allDeals) {
+    // Process each deal and fetch its invoices + invoice line items
+    for (const deal of wholesaleDeals) {
       const dealId = deal.id;
       const props = deal.properties || {};
       
       try {
-        // Fetch deal line items
-        const lineItems = await hubspotClient.getDealLineItems(dealId);
-        
-        // Check if any line item contains "wholesale"
-        const wholesaleItems = lineItems.filter(item => {
+        // Fetch invoice + invoice line items via existing helper
+        const invoiceData = await hubspotClient.getDealInvoices(dealId);
+
+        let invoiceLineItems = [];
+        let invoiceObj = null;
+
+        if (Array.isArray(invoiceData)) {
+          // Old format: just line items
+          invoiceLineItems = invoiceData;
+        } else if (invoiceData && invoiceData.invoice) {
+          invoiceLineItems = Array.isArray(invoiceData.lineItems) ? invoiceData.lineItems : [];
+          invoiceObj = invoiceData.invoice;
+        } else {
+          // No invoice found → skip
+          console.log(`ℹ️ No invoice data for deal ${dealId}, skipping`);
+          continue;
+        }
+
+        // Filter by invoice payment status: PAID or PARTIALLY PAID only
+        const statusRaw = (invoiceObj?.properties?.hs_status || '').toString().toLowerCase();
+        if (statusRaw && !(statusRaw.includes('paid'))) {
+          console.log(`ℹ️ Deal ${dealId} invoice status '${statusRaw}' is not paid/partially paid, skipping`);
+          continue;
+        }
+
+        // Identify wholesale line items on the invoice
+        const wholesaleItems = invoiceLineItems.filter(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
           return name.includes('wholesale') || description.includes('wholesale');
         });
-        
-        if (wholesaleItems.length === 0) continue; // Skip non-wholesale deals
-        
-        // Fetch invoices for this deal
-        const invoices = await hubspotClient.getDealInvoices(dealId);
-        
-        // Calculate totals
+
+        if (wholesaleItems.length === 0) {
+          console.log(`ℹ️ Deal ${dealId} has no wholesale invoice items, skipping`);
+          continue;
+        }
+
+        // Calculate cups revenue (from wholesale items)
         const cupsRevenue = wholesaleItems.reduce((sum, item) => {
           const quantity = parseInt(item.properties?.quantity || 0);
           const price = parseFloat(item.properties?.price || 0);
           return sum + (quantity * price);
         }, 0);
-        
-        const shippingCharged = lineItems.find(item => 
+
+        // Shipping charged = invoice line item whose name includes 'shipping'
+        const shippingItem = invoiceLineItems.find(item =>
           (item.properties?.name || '').toLowerCase().includes('shipping')
-        )?.properties?.price || 0;
-        
-        const totalRevenue = cupsRevenue + parseFloat(shippingCharged);
+        );
+        const shippingCharged = parseFloat(shippingItem?.properties?.amount || shippingItem?.properties?.price || 0);
+
+        const totalRevenue = cupsRevenue + shippingCharged;
         const totalRevenueExGST = totalRevenue / 1.1;
-        
+
+        // Names & business names
+        const companyName =
+          invoiceObj?.properties?.shipping_business_name ||
+          props.company_name ||
+          props.dealname ||
+          'Unknown';
+
+        const contactName =
+          invoiceObj?.properties?.hs_recipient_shipping_name ||
+          props.dealname ||
+          'Unknown';
+
         // Get actuals from database
         const actuals = wholesaleActualsDB[dealId] || {
           actual_shipping_cost: 0,
-          shipping_charged_to_customer: parseFloat(shippingCharged),
+          shipping_charged_to_customer: shippingCharged,
           plate_fee_cost: 0,
           cups_cogs_total: 0,
           overprint_percent: 0,
@@ -5682,21 +5727,22 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           notes: ''
         };
         
-        wholesaleJobs.push({
+        const job = {
           hubspot_deal_id: dealId,
           deal_name: props.dealname || 'Untitled Deal',
-          customer: props.company_name || props.dealname || 'Unknown',
+          customer: contactName,
+          business_name: companyName,
           date: props.closedate || props.createdate,
           stage: props.dealstage,
           
           // Revenue breakdown
           cups_revenue_ex_gst: cupsRevenue / 1.1,
-          shipping_revenue: parseFloat(shippingCharged),
+          shipping_revenue: shippingCharged,
           total_revenue_ex_gst: totalRevenueExGST,
           total_revenue_inc_gst: totalRevenue,
-          currency: 'AUD',
+          currency: invoiceObj?.properties?.hs_currency || 'AUD',
           
-          // Line items
+          // Wholesale invoice line items
           line_items: wholesaleItems.map(item => ({
             name: item.properties?.name || '',
             description: item.properties?.description || '',
@@ -5705,28 +5751,42 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
             amount: parseFloat(item.properties?.amount || 0)
           })),
           
-          // Invoices
-          invoices: invoices.map(inv => ({
-            id: inv.id,
-            number: inv.properties?.hs_invoice_number || '',
-            amount: parseFloat(inv.properties?.hs_amount_billed || 0),
-            status: inv.properties?.hs_invoice_status || ''
-          })),
+          // Invoices (single primary invoice for now)
+          invoices: invoiceObj ? [{
+            id: invoiceObj.id || invoiceObj.properties?.hs_object_id || dealId,
+            number: invoiceObj.properties?.hs_invoice_number || '',
+            amount: parseFloat(invoiceObj.properties?.hs_amount_billed || 0),
+            status: invoiceObj.properties?.hs_status || ''
+          }] : [],
           
           // Actuals (from database)
-          actuals: actuals,
-          
-          // Calculated fields
-          calculated: {
-            total_actual_cost: actuals.actual_shipping_cost + actuals.plate_fee_cost + actuals.cups_cogs_total + actuals.overprint_cost - actuals.underprint_refund_amount,
-            shipping_gp_percent: actuals.shipping_charged_to_customer > 0 
-              ? ((actuals.shipping_charged_to_customer - actuals.actual_shipping_cost) / actuals.shipping_charged_to_customer) * 100
+          actuals: actuals
+        };
+
+        // Calculated fields
+        const totalActualCost =
+          actuals.actual_shipping_cost +
+          actuals.plate_fee_cost +
+          actuals.cups_cogs_total +
+          actuals.overprint_cost -
+          actuals.underprint_refund_amount;
+
+        const cupsRevEx = job.cups_revenue_ex_gst || 0;
+
+        job.calculated = {
+          total_actual_cost: totalActualCost,
+          shipping_gp_percent:
+            actuals.shipping_charged_to_customer > 0
+              ? ((actuals.shipping_charged_to_customer - actuals.actual_shipping_cost) /
+                  actuals.shipping_charged_to_customer) * 100
               : 0,
-            cups_gp_percent: (cupsRevenue / 1.1) > 0
-              ? (((cupsRevenue / 1.1) - actuals.cups_cogs_total) / (cupsRevenue / 1.1)) * 100
+          cups_gp_percent:
+            cupsRevEx > 0
+              ? ((cupsRevEx - actuals.cups_cogs_total) / cupsRevEx) * 100
               : 0
-          }
-        });
+        };
+
+        wholesaleJobs.push(job);
         
       } catch (err) {
         console.warn(`⚠️ Error processing deal ${dealId}:`, err.message);
@@ -5735,17 +5795,18 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
     
     // Calculate overall GP for each job
     wholesaleJobs.forEach(job => {
-      const totalCost = job.calculated.total_actual_cost;
-      job.calculated.overall_gp_percent = job.total_revenue_ex_gst > 0
-        ? ((job.total_revenue_ex_gst - totalCost) / job.total_revenue_ex_gst) * 100
+      const totalCost = job.calculated.total_actual_cost || 0;
+      const revEx = job.total_revenue_ex_gst || 0;
+      job.calculated.overall_gp_percent = revEx > 0
+        ? ((revEx - totalCost) / revEx) * 100
         : 0;
-      job.calculated.profit = job.total_revenue_ex_gst - totalCost;
+      job.calculated.profit = revEx - totalCost;
     });
     
     // Sort by date descending
     wholesaleJobs.sort((a, b) => new Date(b.date) - new Date(a.date));
     
-    console.log(`✅ Found ${wholesaleJobs.length} wholesale jobs from HubSpot`);
+    console.log(`✅ Found ${wholesaleJobs.length} wholesale jobs from HubSpot after invoice filtering`);
     return wholesaleJobs;
     
   } catch (error) {
