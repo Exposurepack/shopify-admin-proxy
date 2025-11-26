@@ -5731,10 +5731,15 @@ async function getAllWholesaleInvoices(dateRange = null) {
           contactId = contactAssociations[0].id;
           
           try {
-            const contactResponse = await hubspotClient.client.crm.objects.contacts.basicApi.getById(
-              contactId,
-              ['email', 'phone', 'firstname', 'lastname', 'mobilephone']
-            );
+            const contactResponse = await axios.get(
+              `https://api.hubapi.com/crm/v3/objects/contacts/${contactId}`,
+              {
+                headers: hubspotClient.headers,
+                params: {
+                  properties: 'email,phone,firstname,lastname,mobilephone'
+                }
+              }
+            ).then(res => res.data);
             
             const contactProps = contactResponse.properties || {};
             contactEmail = contactProps.email || null;
@@ -5824,27 +5829,18 @@ async function getAllWholesaleInvoices(dateRange = null) {
 
     do {
       pageCount++;
-      const response = await hubspotClient.client.crm.objects.invoices.basicApi.getPage(
-        100,
-        after,
-        [
-          'hs_object_id',
-          'hs_createdate',
-          'hs_lastmodifieddate',
-          'hs_status',
-          'hs_invoice_status',
-          'hs_payment_status',
-          'hs_currency',
-          'hs_customer_name',
-          'hs_billing_name',
-          'hs_company_name',
-          'hs_business_name',
-          'hs_recipient_company_name',
-          'hs_recipient_shipping_name'
-        ],
-        undefined,
-        ['line_items', 'deals', 'contacts']
-      );
+      const response = await axios.get(
+        'https://api.hubapi.com/crm/v3/objects/invoices',
+        {
+          headers: hubspotClient.headers,
+          params: {
+            limit: 100,
+            after: after,
+            properties: 'hs_object_id,hs_createdate,hs_lastmodifieddate,hs_status,hs_invoice_status,hs_payment_status,hs_currency,hs_customer_name,hs_billing_name,hs_company_name,hs_business_name,hs_recipient_company_name,hs_recipient_shipping_name',
+            associations: 'line_items,deals,contacts'
+          }
+        }
+      ).then(res => res.data);
 
       totalInvoices += response.results.length;
 
@@ -5870,10 +5866,14 @@ async function getAllWholesaleInvoices(dateRange = null) {
           if (lineItemAssociations.length === 0) continue;
 
           const lineItemIds = lineItemAssociations.map(a => a.id);
-          const lineItemsResponse = await hubspotClient.client.crm.objects.lineItems.batchApi.read({
-            properties: ['name', 'description', 'quantity', 'price', 'amount', 'hs_sku', 'hs_discount_percentage'],
-            inputs: lineItemIds.map(id => ({ id }))
-          });
+          const lineItemsResponse = await axios.post(
+            'https://api.hubapi.com/crm/v3/objects/line_items/batch/read',
+            {
+              properties: ['name', 'description', 'quantity', 'price', 'amount', 'hs_sku', 'hs_discount_percentage'],
+              inputs: lineItemIds.map(id => ({ id }))
+            },
+            { headers: hubspotClient.headers }
+          ).then(res => res.data);
 
           const invoiceLineItems = lineItemsResponse.results || [];
 
@@ -5956,10 +5956,15 @@ async function getAllWholesaleInvoices(dateRange = null) {
             contactId = contactAssociations[0].id;
             
             try {
-              const contactResponse = await hubspotClient.client.crm.objects.contacts.basicApi.getById(
-                contactId,
-                ['email', 'phone', 'firstname', 'lastname', 'mobilephone']
-              );
+              const contactResponse = await axios.get(
+                `https://api.hubapi.com/crm/v3/objects/contacts/${contactId}`,
+                {
+                  headers: hubspotClient.headers,
+                  params: {
+                    properties: 'email,phone,firstname,lastname,mobilephone'
+                  }
+                }
+              ).then(res => res.data);
               
               const contactProps = contactResponse.properties || {};
               contactEmail = contactProps.email || null;
