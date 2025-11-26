@@ -10,6 +10,7 @@ import helmet from "helmet";
 import session from "express-session";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import fs from "fs";
 
 dotenv.config();
 
@@ -5630,7 +5631,6 @@ app.use('*', (req, res) => {
 // ===== WHOLESALE PROFIT INTELLIGENCE REPORT =====
 
 // Simple file-based storage for wholesale job actuals (upgrade to PostgreSQL/MongoDB in production)
-const fs = require('fs');
 const ACTUALS_DB_PATH = './wholesale_job_actuals.json';
 
 // Initialize actuals database
