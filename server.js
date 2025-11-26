@@ -5709,7 +5709,9 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           );
         }
 
-        // 5) Simple wholesale rule: any invoice that has a plate line item is wholesale
+        // 5) Simple wholesale rule:
+        //    - any invoice that has a plate line item, OR
+        //    - any invoice that has a 10k+ line item (name/description contains "10k" or "10000")
         const hasPlateLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
@@ -5719,15 +5721,26 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           );
         });
 
+        const hasTenKLineItem = invoiceLineItems.some(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          return (
+            name.includes('10k') ||
+            description.includes('10k') ||
+            name.includes('10000') ||
+            description.includes('10000')
+          );
+        });
+
         console.log(
-          `🧮 Wholesale check for deal ${dealId}: hasPlateLineItem=${hasPlateLineItem}`
+          `🧮 Wholesale check for deal ${dealId}: hasPlateLineItem=${hasPlateLineItem}, hasTenKLineItem=${hasTenKLineItem}`
         );
 
-        if (!hasPlateLineItem) {
+        if (!(hasPlateLineItem || hasTenKLineItem)) {
           console.log(
             `ℹ️ Deal ${dealId} invoice ${
               invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
-            } has no plate line item, skipping (not wholesale)`
+            } has no plate or 10k+ line item, skipping (not wholesale)`
           );
           continue;
         }
