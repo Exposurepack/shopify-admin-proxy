@@ -5627,6 +5627,625 @@ app.use('*', (req, res) => {
   });
 });
 
+// ===== WHOLESALE PROFIT INTELLIGENCE REPORT =====
+
+// In-memory storage for wholesale job cost data (in production, use a database)
+const wholesaleCostData = new Map();
+
+/**
+ * Helper: Merge Shopify + HubSpot wholesale orders
+ * Returns unified wholesale job data with revenue, line items, etc.
+ */
+async function getWholesaleMergedData(dateRange = null) {
+  try {
+    const wholesaleJobs = [];
+    
+    // 1. Fetch Shopify orders
+    let allShopifyOrders = [];
+    let nextPageUrl = `${process.env.SHOPIFY_STORE_URL ? `https://${process.env.SHOPIFY_STORE_URL}` : 'https://exposurepack-myshopify-com.myshopify.com'}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=250&status=any`;
+    let pageCount = 0;
+    const maxPages = 20;
+    
+    while (nextPageUrl && pageCount < maxPages) {
+      const resp = await axios.get(nextPageUrl, {
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN }
+      });
+      const orders = resp.data?.orders || [];
+      allShopifyOrders = allShopifyOrders.concat(orders);
+      
+      const linkHeader = resp.headers['link'];
+      nextPageUrl = null;
+      if (linkHeader) {
+        const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        if (nextMatch) nextPageUrl = nextMatch[1];
+      }
+      pageCount++;
+    }
+    
+    // Filter Shopify orders with wholesale line items
+    const shopifyWholesale = allShopifyOrders.filter(order => {
+      const lineItems = order.line_items || [];
+      return lineItems.some(item => 
+        (item.title || '').toLowerCase().includes('wholesale') ||
+        (item.name || '').toLowerCase().includes('wholesale')
+      );
+    });
+    
+    // 2. Fetch HubSpot deals if available
+    let hubspotWholesale = [];
+    if (hubspotClient) {
+      try {
+        const allDeals = await fetchHubSpotDealsForAnalytics();
+        hubspotWholesale = allDeals.filter(deal => {
+          const dealName = (deal.properties?.dealname || '').toLowerCase();
+          return dealName.includes('wholesale');
+        });
+      } catch (hubspotError) {
+        console.warn('⚠️ HubSpot fetch failed for wholesale report:', hubspotError.message);
+      }
+    }
+    
+    // 3. Merge and deduplicate
+    const jobMap = new Map();
+    
+    // Add Shopify wholesale orders
+    shopifyWholesale.forEach(order => {
+      const customerName = order.customer?.first_name && order.customer?.last_name 
+        ? `${order.customer.first_name} ${order.customer.last_name}`
+        : order.customer?.email || 'Unknown Customer';
+      const companyName = order.customer?.default_address?.company || order.billing_address?.company || '';
+      
+      // Calculate revenue ex GST (AUD typically has 10% GST)
+      const totalIncGST = parseFloat(order.total_price || 0);
+      const totalExGST = totalIncGST / 1.1;
+      
+      const wholesaleItems = (order.line_items || []).filter(item =>
+        (item.title || '').toLowerCase().includes('wholesale') ||
+        (item.name || '').toLowerCase().includes('wholesale')
+      );
+      
+      const jobKey = `shopify_${order.id}`;
+      jobMap.set(jobKey, {
+        id: jobKey,
+        platform: 'Shopify',
+        orderId: order.name || order.id,
+        orderNumber: order.order_number,
+        customer: customerName,
+        company: companyName,
+        email: order.customer?.email || '',
+        date: order.created_at,
+        revenueIncGST: totalIncGST,
+        revenueExGST: totalExGST,
+        currency: order.currency || 'AUD',
+        lineItems: wholesaleItems.map(item => ({
+          title: item.title || item.name,
+          quantity: item.quantity,
+          price: parseFloat(item.price || 0),
+          sku: item.sku
+        })),
+        tags: Array.isArray(order.tags) ? order.tags : (order.tags || '').split(',').map(t => t.trim()),
+        rawData: order
+      });
+    });
+    
+    // Add HubSpot wholesale deals
+    hubspotWholesale.forEach(deal => {
+      const props = deal.properties || {};
+      const dealId = deal.id;
+      const customerName = props.company_name || props.dealname || 'Unknown';
+      
+      const amountExGST = parseFloat(props.amount_ex_gst || props.amount || 0);
+      const amountIncGST = amountExGST * 1.1;
+      
+      // Try to match with existing Shopify order to avoid duplication
+      const potentialDupe = Array.from(jobMap.values()).find(job =>
+        job.customer.toLowerCase().includes(customerName.toLowerCase()) ||
+        customerName.toLowerCase().includes(job.customer.toLowerCase())
+      );
+      
+      if (!potentialDupe) {
+        const jobKey = `hubspot_${dealId}`;
+        jobMap.set(jobKey, {
+          id: jobKey,
+          platform: 'HubSpot',
+          orderId: dealId,
+          orderNumber: dealId,
+          customer: customerName,
+          company: customerName,
+          email: '',
+          date: props.closedate || props.createdate,
+          revenueIncGST: amountIncGST,
+          revenueExGST: amountExGST,
+          currency: 'AUD',
+          lineItems: [],
+          tags: [],
+          rawData: deal
+        });
+      }
+    });
+    
+    // Convert to array and apply date filter
+    let jobs = Array.from(jobMap.values());
+    
+    if (dateRange && dateRange.startDate && dateRange.endDate) {
+      const start = new Date(dateRange.startDate);
+      const end = new Date(dateRange.endDate);
+      jobs = jobs.filter(job => {
+        const jobDate = new Date(job.date);
+        return jobDate >= start && jobDate <= end;
+      });
+    }
+    
+    // Sort by date descending
+    jobs.sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    // Attach cost data if available
+    jobs.forEach(job => {
+      if (wholesaleCostData.has(job.id)) {
+        job.costs = wholesaleCostData.get(job.id);
+      } else {
+        job.costs = {
+          shippingCost: 0,
+          plateFees: 0,
+          wholesaleCOGS: 0,
+          overprintPercent: 0,
+          underprintPercent: 0,
+          shippingCharged: 0
+        };
+      }
+    });
+    
+    return jobs;
+    
+  } catch (error) {
+    console.error('❌ Error fetching wholesale merged data:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Helper: Calculate historical averages from wholesale jobs
+ */
+function calculateHistoricalAverages(jobs) {
+  if (!jobs || jobs.length === 0) {
+    return {
+      avgShippingPercent: 0,
+      avgOverprintPercent: 0,
+      avgUnderprintPercent: 0,
+      avgCOGSPercent: 0,
+      avgMarginPercent: 0,
+      avgShippingChargedVsPaid: 0,
+      totalRevenue: 0,
+      totalJobs: 0
+    };
+  }
+  
+  let totalRevenue = 0;
+  let totalShippingCost = 0;
+  let totalOverprint = 0;
+  let totalUnderprint = 0;
+  let totalCOGS = 0;
+  let totalShippingCharged = 0;
+  let jobsWithCosts = 0;
+  
+  jobs.forEach(job => {
+    const revenue = job.revenueExGST || 0;
+    totalRevenue += revenue;
+    
+    if (job.costs && revenue > 0) {
+      totalShippingCost += job.costs.shippingCost || 0;
+      totalCOGS += job.costs.wholesaleCOGS || 0;
+      totalShippingCharged += job.costs.shippingCharged || 0;
+      
+      // Calculate overprint/underprint amounts
+      const overprintAmount = revenue * ((job.costs.overprintPercent || 0) / 100);
+      const underprintAmount = revenue * ((job.costs.underprintPercent || 0) / 100);
+      totalOverprint += overprintAmount;
+      totalUnderprint += underprintAmount;
+      
+      if (job.costs.shippingCost > 0 || job.costs.wholesaleCOGS > 0) {
+        jobsWithCosts++;
+      }
+    }
+  });
+  
+  return {
+    avgShippingPercent: totalRevenue > 0 ? (totalShippingCost / totalRevenue) * 100 : 0,
+    avgOverprintPercent: totalRevenue > 0 ? (totalOverprint / totalRevenue) * 100 : 0,
+    avgUnderprintPercent: totalRevenue > 0 ? (totalUnderprint / totalRevenue) * 100 : 0,
+    avgCOGSPercent: totalRevenue > 0 ? (totalCOGS / totalRevenue) * 100 : 0,
+    avgMarginPercent: totalRevenue > 0 ? ((totalRevenue - totalCOGS - totalShippingCost - totalOverprint + totalUnderprint) / totalRevenue) * 100 : 0,
+    avgShippingChargedVsPaid: totalShippingCost > 0 ? (totalShippingCharged / totalShippingCost) * 100 : 0,
+    totalRevenue,
+    totalJobs: jobs.length,
+    jobsWithCostData: jobsWithCosts
+  };
+}
+
+/**
+ * GET /wholesale-profit-data
+ * Returns merged Shopify + HubSpot wholesale data with cost fields
+ */
+app.get('/wholesale-profit-data', async (req, res) => {
+  try {
+    console.log('📊 Fetching wholesale profit data...');
+    
+    const dateRange = req.query.startDate && req.query.endDate ? {
+      startDate: req.query.startDate,
+      endDate: req.query.endDate
+    } : null;
+    
+    const jobs = await getWholesaleMergedData(dateRange);
+    const averages = calculateHistoricalAverages(jobs);
+    
+    console.log(`✅ Wholesale data: ${jobs.length} jobs, ${averages.jobsWithCostData} with cost data`);
+    
+    res.json({
+      success: true,
+      jobs,
+      averages,
+      total_count: jobs.length,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ Wholesale profit data error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      jobs: [],
+      averages: {}
+    });
+  }
+});
+
+/**
+ * POST /wholesale-profit-costs
+ * Save cost data for a specific wholesale job
+ */
+app.post('/wholesale-profit-costs', express.json(), (req, res) => {
+  try {
+    const { jobId, costs } = req.body;
+    
+    if (!jobId) {
+      return res.status(400).json({ success: false, error: 'Job ID required' });
+    }
+    
+    wholesaleCostData.set(jobId, {
+      shippingCost: parseFloat(costs.shippingCost || 0),
+      plateFees: parseFloat(costs.plateFees || 0),
+      wholesaleCOGS: parseFloat(costs.wholesaleCOGS || 0),
+      overprintPercent: parseFloat(costs.overprintPercent || 0),
+      underprintPercent: parseFloat(costs.underprintPercent || 0),
+      shippingCharged: parseFloat(costs.shippingCharged || 0),
+      updatedAt: new Date().toISOString()
+    });
+    
+    console.log(`💾 Saved cost data for job ${jobId}`);
+    
+    res.json({
+      success: true,
+      message: 'Cost data saved',
+      jobId,
+      costs: wholesaleCostData.get(jobId)
+    });
+    
+  } catch (error) {
+    console.error('❌ Save wholesale costs error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /wholesale-profit-simulate
+ * Run forecast simulation with adjustable parameters
+ */
+app.post('/wholesale-profit-simulate', express.json(), async (req, res) => {
+  try {
+    console.log('🔮 Running wholesale profit simulation...');
+    
+    const {
+      scenarioName,
+      priceDropPercent,
+      customerGrowthPercent,
+      newCustomerReorderRate,
+      returningCustomerReorderRate,
+      coverFreightAndOverUnder,
+      useHistoricalAverages,
+      customAverages,
+      years
+    } = req.body;
+    
+    // Get historical data
+    const jobs = await getWholesaleMergedData();
+    const historicalAvg = calculateHistoricalAverages(jobs);
+    
+    // Determine which averages to use
+    const avgToUse = useHistoricalAverages ? historicalAvg : {
+      avgShippingPercent: customAverages?.shippingPercent || 0,
+      avgOverprintPercent: customAverages?.overprintPercent || 0,
+      avgUnderprintPercent: customAverages?.underprintPercent || 0,
+      avgCOGSPercent: customAverages?.cogsPercent || 0
+    };
+    
+    // Calculate baseline metrics
+    const currentRevenue = historicalAvg.totalRevenue;
+    const currentCustomers = new Set(jobs.map(j => j.customer)).size;
+    const avgRevenuePerCustomer = currentCustomers > 0 ? currentRevenue / currentCustomers : 0;
+    
+    // Simulate future years
+    const timeline = [];
+    const yearsToSimulate = years || 5;
+    
+    for (let year = 1; year <= yearsToSimulate; year++) {
+      // Compound customer growth
+      const projectedCustomers = Math.round(currentCustomers * Math.pow(1 + (customerGrowthPercent / 100), year));
+      
+      // Price adjustment
+      const adjustedPrice = avgRevenuePerCustomer * (1 - (priceDropPercent / 100));
+      
+      // Revenue calculation with reorder rates
+      const newCustomerCount = projectedCustomers - currentCustomers;
+      const returningCustomerCount = currentCustomers;
+      
+      const newCustomerRevenue = newCustomerCount * adjustedPrice * (newCustomerReorderRate || 3.2);
+      const returningCustomerRevenue = returningCustomerCount * adjustedPrice * (returningCustomerReorderRate || 4.1);
+      const totalRevenue = newCustomerRevenue + returningCustomerRevenue;
+      
+      // Cost calculations
+      let costs = {
+        cogs: totalRevenue * (avgToUse.avgCOGSPercent / 100),
+        shipping: 0,
+        overprint: 0,
+        underprint: 0
+      };
+      
+      if (coverFreightAndOverUnder) {
+        costs.shipping = totalRevenue * (avgToUse.avgShippingPercent / 100);
+        costs.overprint = totalRevenue * (avgToUse.avgOverprintPercent / 100);
+        costs.underprint = totalRevenue * (avgToUse.avgUnderprintPercent / 100);
+      }
+      
+      const totalCosts = costs.cogs + costs.shipping + costs.overprint - costs.underprint;
+      const profit = totalRevenue - totalCosts;
+      const marginPercent = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+      
+      timeline.push({
+        year,
+        customers: projectedCustomers,
+        revenue: totalRevenue,
+        costs: totalCosts,
+        profit,
+        marginPercent,
+        breakdown: costs
+      });
+    }
+    
+    console.log(`✅ Simulation complete: ${scenarioName}, ${yearsToSimulate} years`);
+    
+    res.json({
+      success: true,
+      scenario: scenarioName,
+      parameters: {
+        priceDropPercent,
+        customerGrowthPercent,
+        newCustomerReorderRate,
+        returningCustomerReorderRate,
+        coverFreightAndOverUnder,
+        useHistoricalAverages
+      },
+      baseline: {
+        currentRevenue,
+        currentCustomers,
+        avgRevenuePerCustomer
+      },
+      timeline,
+      historicalAverages: historicalAvg
+    });
+    
+  } catch (error) {
+    console.error('❌ Simulation error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /wholesale-profit-export-csv
+ * Export wholesale profit report as CSV
+ */
+app.get('/wholesale-profit-export-csv', async (req, res) => {
+  try {
+    console.log('📥 Generating wholesale profit CSV export...');
+    
+    const jobs = await getWholesaleMergedData();
+    
+    // Build CSV
+    const headers = [
+      'Date',
+      'Platform',
+      'Order ID',
+      'Customer',
+      'Company',
+      'Email',
+      'Revenue (Ex GST)',
+      'Revenue (Inc GST)',
+      'Currency',
+      'Shipping Cost',
+      'Plate Fees',
+      'COGS',
+      'Overprint %',
+      'Underprint %',
+      'Shipping Charged',
+      'Total Costs',
+      'Profit',
+      'Margin %'
+    ];
+    
+    const rows = jobs.map(job => {
+      const revenue = job.revenueExGST || 0;
+      const costs = job.costs || {};
+      
+      const shippingCost = costs.shippingCost || 0;
+      const plateFees = costs.plateFees || 0;
+      const cogs = costs.wholesaleCOGS || 0;
+      const overprintAmount = revenue * ((costs.overprintPercent || 0) / 100);
+      const underprintAmount = revenue * ((costs.underprintPercent || 0) / 100);
+      
+      const totalCosts = shippingCost + plateFees + cogs + overprintAmount - underprintAmount;
+      const profit = revenue - totalCosts;
+      const marginPercent = revenue > 0 ? (profit / revenue) * 100 : 0;
+      
+      return [
+        new Date(job.date).toLocaleDateString('en-AU'),
+        job.platform,
+        job.orderId,
+        job.customer,
+        job.company,
+        job.email,
+        revenue.toFixed(2),
+        job.revenueIncGST.toFixed(2),
+        job.currency,
+        shippingCost.toFixed(2),
+        plateFees.toFixed(2),
+        cogs.toFixed(2),
+        (costs.overprintPercent || 0).toFixed(2),
+        (costs.underprintPercent || 0).toFixed(2),
+        (costs.shippingCharged || 0).toFixed(2),
+        totalCosts.toFixed(2),
+        profit.toFixed(2),
+        marginPercent.toFixed(2)
+      ];
+    });
+    
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="wholesale-profit-report-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csvContent);
+    
+    console.log(`✅ CSV export complete: ${jobs.length} jobs`);
+    
+  } catch (error) {
+    console.error('❌ CSV export error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /wholesale-profit-export-pdf
+ * Export wholesale profit report as PDF (basic version - you can enhance with a PDF library)
+ */
+app.get('/wholesale-profit-export-pdf', async (req, res) => {
+  try {
+    console.log('📥 Generating wholesale profit PDF export...');
+    
+    const jobs = await getWholesaleMergedData();
+    const averages = calculateHistoricalAverages(jobs);
+    
+    // For now, return HTML that can be printed to PDF by the browser
+    // In production, use a library like puppeteer or pdfkit
+    const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Wholesale Profit Intelligence Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    h1 { color: #00B2A9; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 11px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #00B2A9; color: white; }
+    .summary { background: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+    .summary h2 { margin-top: 0; }
+    @media print { body { margin: 20px; } }
+  </style>
+</head>
+<body>
+  <h1>Wholesale Profit Intelligence Report</h1>
+  <p>Generated: ${new Date().toLocaleString('en-AU')}</p>
+  
+  <div class="summary">
+    <h2>Summary</h2>
+    <p><strong>Total Jobs:</strong> ${jobs.length}</p>
+    <p><strong>Total Revenue:</strong> $${averages.totalRevenue.toFixed(2)} AUD (Ex GST)</p>
+    <p><strong>Average Margin:</strong> ${averages.avgMarginPercent.toFixed(2)}%</p>
+    <p><strong>Average Shipping:</strong> ${averages.avgShippingPercent.toFixed(2)}% of revenue</p>
+    <p><strong>Average COGS:</strong> ${averages.avgCOGSPercent.toFixed(2)}% of revenue</p>
+    <p><strong>Jobs with Cost Data:</strong> ${averages.jobsWithCostData}</p>
+  </div>
+  
+  <h2>Detailed Job List</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Platform</th>
+        <th>Order</th>
+        <th>Customer</th>
+        <th>Revenue (Ex GST)</th>
+        <th>Shipping</th>
+        <th>COGS</th>
+        <th>Profit</th>
+        <th>Margin %</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${jobs.map(job => {
+        const revenue = job.revenueExGST || 0;
+        const costs = job.costs || {};
+        const shippingCost = costs.shippingCost || 0;
+        const cogs = costs.wholesaleCOGS || 0;
+        const overprintAmount = revenue * ((costs.overprintPercent || 0) / 100);
+        const underprintAmount = revenue * ((costs.underprintPercent || 0) / 100);
+        const totalCosts = shippingCost + cogs + overprintAmount - underprintAmount;
+        const profit = revenue - totalCosts;
+        const marginPercent = revenue > 0 ? (profit / revenue) * 100 : 0;
+        
+        return `
+          <tr>
+            <td>${new Date(job.date).toLocaleDateString('en-AU')}</td>
+            <td>${job.platform}</td>
+            <td>${job.orderId}</td>
+            <td>${job.customer}</td>
+            <td>$${revenue.toFixed(2)}</td>
+            <td>$${shippingCost.toFixed(2)}</td>
+            <td>$${cogs.toFixed(2)}</td>
+            <td>$${profit.toFixed(2)}</td>
+            <td>${marginPercent.toFixed(1)}%</td>
+          </tr>
+        `;
+      }).join('')}
+    </tbody>
+  </table>
+</body>
+</html>`;
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.send(htmlContent);
+    
+    console.log(`✅ PDF HTML export complete: ${jobs.length} jobs`);
+    
+  } catch (error) {
+    console.error('❌ PDF export error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log("✅ ===============================================");
