@@ -5711,7 +5711,7 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
 
         // 5) Simple wholesale rule:
         //    - any invoice that has a plate line item, OR
-        //    - any invoice that has a 10k+ line item (name/description contains "10k" or "10000")
+        //    - any invoice that has a 10k+ line item (quantity >= 10,000 OR name/description contains "10k"/"10000")
         const hasPlateLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
@@ -5724,12 +5724,15 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         const hasTenKLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
-          return (
+          const qty = parseInt(item.properties?.quantity || 0, 10);
+
+          const textLooksTenK =
             name.includes('10k') ||
             description.includes('10k') ||
             name.includes('10000') ||
-            description.includes('10000')
-          );
+            description.includes('10000');
+
+          return qty >= 10000 || textLooksTenK;
         });
 
         console.log(
