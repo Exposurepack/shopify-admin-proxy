@@ -5675,7 +5675,7 @@ async function getWholesaleMergedData(dateRange = null) {
     let hubspotWholesale = [];
     if (hubspotClient) {
       try {
-        const allDeals = await fetchHubSpotDealsForAnalytics();
+        const allDeals = await hubspotClient.getDealsForAnalytics();
         hubspotWholesale = allDeals.filter(deal => {
           const dealName = (deal.properties?.dealname || '').toLowerCase();
           return dealName.includes('wholesale');
