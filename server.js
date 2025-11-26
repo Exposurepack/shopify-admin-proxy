@@ -5592,42 +5592,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Global error handler
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ 
-        error: "File too large", 
-        message: "Maximum file size is 25MB" 
-      });
-    }
-  }
-  
-  handleError(err, res, "Unexpected server error");
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: "Endpoint not found",
-    message: `${req.method} ${req.originalUrl} is not a valid endpoint`,
-    availableEndpoints: [
-      "GET /meta",
-      "GET /orders", 
-      "GET /orders/:id",
-      "GET /rest/orders/:id",
-      "GET /rest/locations",
-      "GET /metafields",
-      "POST /metafields",
-      "GET /fulfillments/test",
-      "POST /fulfillments",
-      "POST /upload-file",
-      "POST /webhook",
-      "POST /shopify-webhook"
-    ]
-  });
-});
-
 // ===== WHOLESALE PROFIT INTELLIGENCE REPORT =====
 
 // Simple file-based storage for wholesale job actuals (upgrade to PostgreSQL/MongoDB in production)
@@ -6008,6 +5972,42 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
       error: error.message
     });
   }
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ 
+        error: "File too large", 
+        message: "Maximum file size is 25MB" 
+      });
+    }
+  }
+  
+  handleError(err, res, "Unexpected server error");
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: "Endpoint not found",
+    message: `${req.method} ${req.originalUrl} is not a valid endpoint`,
+    availableEndpoints: [
+      "GET /meta",
+      "GET /orders", 
+      "GET /orders/:id",
+      "GET /rest/orders/:id",
+      "GET /rest/locations",
+      "GET /metafields",
+      "POST /metafields",
+      "GET /fulfillments/test",
+      "POST /fulfillments",
+      "POST /upload-file",
+      "POST /webhook",
+      "POST /shopify-webhook"
+    ]
+  });
 });
 
 // Start server
