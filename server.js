@@ -5626,13 +5626,16 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
         let invoiceObj = null;
         let invoiceLineItems = [];
 
+        // STRICT: No invoice = skip deal (no fallback to deal line items)
         if (!invoiceData) {
+          console.log(`ℹ️ No invoice data for deal ${dealId} – skipping (no invoice object)`);
           continue;
         }
 
         if (Array.isArray(invoiceData)) {
-          // Old format: just line items
-          invoiceLineItems = invoiceData;
+          // Old format: just line items (shouldn't happen with current HubSpot client)
+          console.log(`⚠️ Deal ${dealId} returned array format – skipping (no invoice object)`);
+          continue;
         } else {
           // New structured format
           invoiceObj = invoiceData.invoice || null;
@@ -5640,8 +5643,12 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
         }
 
         if (!invoiceObj) {
+          console.log(`ℹ️ No invoice object for deal ${dealId} – skipping (no invoice object)`);
           continue;
         }
+        
+        const invoiceId = invoiceObj.id || invoiceObj.properties?.hs_object_id || 'unknown';
+        console.log(`✅ Found invoice ${invoiceId} with ${invoiceLineItems.length} line items – processing for wholesale check`);
 
         // Get invoice status (do NOT filter by status for now)
         const rawStatus = (
@@ -5654,9 +5661,11 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
           .toLowerCase()
           .trim();
 
-        // 5) Simple wholesale rule:
-        //    - any invoice that has a plate line item, OR
-        //    - any invoice that has a 10k+ line item (quantity >= 10,000 OR name/description contains "10k"/"10000")
+        // WHOLESALE DETECTION: Uses ONLY invoice line items (never deal line items)
+        // Rule: Invoice is wholesale if ANY invoice line item:
+        //   - has "plate" in name/description, OR
+        //   - has "10k"/"10000" in name/description, OR
+        //   - has quantity >= 10,000
         const hasPlateLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
@@ -5862,13 +5871,16 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         let invoiceObj = null;
         let invoiceLineItems = [];
 
+        // STRICT: No invoice = skip deal (no fallback to deal line items)
         if (!invoiceData) {
+          console.log(`ℹ️ No invoice data for deal ${dealId} – skipping (no invoice object)`);
           continue;
         }
 
         if (Array.isArray(invoiceData)) {
-          // Old format: just line items
-          invoiceLineItems = invoiceData;
+          // Old format: just line items (shouldn't happen with current HubSpot client)
+          console.log(`⚠️ Deal ${dealId} returned array format – skipping (no invoice object)`);
+          continue;
         } else {
           // New structured format
           invoiceObj = invoiceData.invoice || null;
@@ -5876,8 +5888,12 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         }
 
         if (!invoiceObj) {
+          console.log(`ℹ️ No invoice object for deal ${dealId} – skipping (no invoice object)`);
           continue;
         }
+        
+        const invoiceId = invoiceObj.id || invoiceObj.properties?.hs_object_id || 'unknown';
+        console.log(`✅ Found invoice ${invoiceId} with ${invoiceLineItems.length} line items – processing for wholesale check`);
 
         // Get invoice status (do NOT filter by status for now)
         const rawStatus = (
@@ -5890,9 +5906,11 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           .toLowerCase()
           .trim();
 
-        // 5) Simple wholesale rule:
-        //    - any invoice that has a plate line item, OR
-        //    - any invoice that has a 10k+ line item (quantity >= 10,000 OR name/description contains "10k"/"10000")
+        // WHOLESALE DETECTION: Uses ONLY invoice line items (never deal line items)
+        // Rule: Invoice is wholesale if ANY invoice line item:
+        //   - has "plate" in name/description, OR
+        //   - has "10k"/"10000" in name/description, OR
+        //   - has quantity >= 10,000
         const hasPlateLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
@@ -6407,7 +6425,8 @@ app.listen(PORT, () => {
   console.log("   🎯 POST /webhook           - HubSpot webhook handler");
   console.log("   🛒 POST /shopify-webhook   - Shopify order webhook");
   console.log("   📮 PUT  /orders/:id/shipping-address - Update order shipping address");
-  console.log("   💰 GET  /wholesale-profit-data - Wholesale profit intelligence");
+  console.log("   💰 GET  /wholesale-profit-data - Wholesale profit intelligence (cached)");
+  console.log("   📡 GET  /wholesale-profit-data/stream - Wholesale profit (live streaming)");
   console.log("   💾 POST /wholesale/actuals/bulk-save - Save wholesale actuals");
   console.log("   📥 GET  /wholesale-profit-export-csv - Export wholesale CSV");
   console.log("✅ ===============================================");
