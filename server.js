@@ -5708,7 +5708,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
           return sum + parseFloat(item.properties?.amount || 0);
         }, 0);
 
-        const totalRevenueExGST = totalRevenue / 1.1;
+        const totalRevenueExGST = totalRevenue;
 
         let customerName =
           invoiceObj?.properties?.hs_customer_name ||
@@ -5780,10 +5780,10 @@ async function getAllWholesaleInvoices(dateRange = null) {
           customer: customerName,
           business_name: businessName,
           date: invoiceDate,
-          cups_revenue_ex_gst: cupsRevenue / 1.1,
-          shipping_revenue: shippingCharged / 1.1,
+          cups_revenue_ex_gst: totalRevenue,
+          shipping_revenue: shippingCharged,
           total_revenue_ex_gst: totalRevenueExGST,
-          total_revenue_inc_gst: totalRevenue,
+          total_revenue_inc_gst: totalRevenue * 1.1,
           currency: invoiceObj?.properties?.hs_currency || 'AUD',
           line_items: invoiceLineItems.map(item => {
             const qtyStr = String(item.properties?.quantity || '0').replace(/,/g, '');
@@ -5802,7 +5802,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
             actual_freight_cost_ex_gst: savedActuals.actual_freight_cost_ex_gst || 0,
             overprint_cost_ex_gst: savedActuals.overprint_cost_ex_gst || 0,
             underprint_refund_ex_gst: savedActuals.underprint_refund_ex_gst || 0,
-            shipping_charged_to_customer: shippingCharged / 1.1,
+            shipping_charged_to_customer: shippingCharged,
             notes: savedActuals.notes || ''
           }
         };
@@ -5855,10 +5855,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
         const props = invoice.properties || {};
         const dealAssociations = invoice.associations?.deals?.results || [];
         
-        // Only process if NO deal association
-        if (dealAssociations.length > 0) {
-          continue;
-        }
+        // removed: if (dealAssociations.length > 0) { continue; }
 
         try {
           const lineItemAssociations = invoice.associations?.['line items']?.results || [];
@@ -5932,7 +5929,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
             return sum + parseFloat(item.properties?.amount || 0);
           }, 0);
 
-          const totalRevenueExGST = totalRevenue / 1.1;
+          const totalRevenueExGST = totalRevenue;
 
           let customerName =
             props.hs_customer_name ||
@@ -5981,8 +5978,10 @@ async function getAllWholesaleInvoices(dateRange = null) {
             }
           }
 
-          const dealId = `INV-${invoiceId}`;
-          const dealName = `Invoice ${invoiceId} (No Deal)`;
+          const dealId = dealAssociations.length > 0 ? dealAssociations[0].id : `INV-${invoiceId}`;
+          const dealName = dealAssociations.length > 0 
+            ? `Invoice ${invoiceId} (Deal ${dealAssociations[0].id})` 
+            : `Invoice ${invoiceId} (No Deal)`;
           const invoiceDate = props.hs_createdate || new Date().toISOString();
 
           // Apply date filter
@@ -6007,10 +6006,10 @@ async function getAllWholesaleInvoices(dateRange = null) {
             customer: customerName,
             business_name: businessName,
             date: invoiceDate,
-            cups_revenue_ex_gst: cupsRevenue / 1.1,
-            shipping_revenue: shippingCharged / 1.1,
+            cups_revenue_ex_gst: totalRevenue,
+            shipping_revenue: shippingCharged,
             total_revenue_ex_gst: totalRevenueExGST,
-            total_revenue_inc_gst: totalRevenue,
+            total_revenue_inc_gst: totalRevenue * 1.1,
             currency: props.hs_currency || 'AUD',
             line_items: invoiceLineItems.map(item => {
               const qtyStr = String(item.properties?.quantity || '0').replace(/,/g, '');
@@ -6029,7 +6028,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
               actual_freight_cost_ex_gst: savedActuals.actual_freight_cost_ex_gst || 0,
               overprint_cost_ex_gst: savedActuals.overprint_cost_ex_gst || 0,
               underprint_refund_ex_gst: savedActuals.underprint_refund_ex_gst || 0,
-              shipping_charged_to_customer: shippingCharged / 1.1,
+              shipping_charged_to_customer: shippingCharged,
               notes: savedActuals.notes || ''
             }
           };
@@ -6271,7 +6270,7 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
           return sum + parseFloat(item.properties?.amount || 0);
         }, 0);
 
-        const totalRevenueExGST = totalRevenue / 1.1;
+        const totalRevenueExGST = totalRevenue;
 
         // 7) Customer info from invoice
         const customerName =
@@ -6305,10 +6304,10 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
           stage: props.dealstage,
 
           // Revenue breakdown
-          cups_revenue_ex_gst: cupsRevenue / 1.1,
+          cups_revenue_ex_gst: totalRevenue,
           shipping_revenue: shippingCharged,
           total_revenue_ex_gst: totalRevenueExGST,
-          total_revenue_inc_gst: totalRevenue,
+          total_revenue_inc_gst: totalRevenue * 1.1,
           currency: invoiceObj?.properties?.hs_currency || 'AUD',
 
           // Wholesale invoice line items
@@ -6518,7 +6517,7 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           : 0;
 
         const totalRevenue = cupsRevenue + shippingCharged;
-        const totalRevenueExGST = totalRevenue / 1.1;
+        const totalRevenueExGST = totalRevenue;
 
         // 7) Customer + business names
         const businessName =
@@ -6551,10 +6550,10 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           stage: props.dealstage,
 
           // Revenue breakdown
-          cups_revenue_ex_gst: cupsRevenue / 1.1,
+          cups_revenue_ex_gst: totalRevenue,
           shipping_revenue: shippingCharged,
           total_revenue_ex_gst: totalRevenueExGST,
-          total_revenue_inc_gst: totalRevenue,
+          total_revenue_inc_gst: totalRevenue * 1.1,
           currency: invoiceObj?.properties?.hs_currency || 'AUD',
 
           // Wholesale invoice line items
@@ -6649,7 +6648,9 @@ function calculateWholesaleSummary(jobs) {
       avgOverallGP: 0,
       avgCupsGP: 0,
       avgShippingGP: 0,
-      jobsWithActuals: 0
+      jobsWithActuals: 0,
+      customerCount: 0,
+      avgOrdersPerCustomer: 0
     };
   }
   
@@ -6660,17 +6661,31 @@ function calculateWholesaleSummary(jobs) {
   let sumCupsGP = 0;
   let sumShippingGP = 0;
   
+  // Count unique customers for reorder rate
+  const uniqueCustomers = new Set();
+  
   jobs.forEach(job => {
     totalRevenue += job.total_revenue_ex_gst || 0;
     totalProfit += job.calculated?.profit || 0;
     
-    if (job.actuals && (job.actuals.actual_shipping_cost > 0 || job.actuals.cups_cogs_total > 0)) {
+    if (job.actuals && (job.actuals.supplier_total_cost_ex_gst > 0 || job.actuals.actual_freight_cost_ex_gst > 0)) {
       jobsWithActuals++;
       sumOverallGP += job.calculated?.overall_gp_percent || 0;
       sumCupsGP += job.calculated?.cups_gp_percent || 0;
       sumShippingGP += job.calculated?.shipping_gp_percent || 0;
     }
+
+    // Track unique customer
+    if (job.hubspot_contact_id) uniqueCustomers.add(`contact:${job.hubspot_contact_id}`);
+    else if (job.contact_email) uniqueCustomers.add(`email:${job.contact_email}`);
+    else if (job.business_name && job.business_name !== 'Unknown') uniqueCustomers.add(`biz:${job.business_name}`);
+    else uniqueCustomers.add(`inv:${job.hubspot_invoice_id}`);
   });
+  
+  const customerCount = uniqueCustomers.size;
+  // Calculate annualized reorder rate?
+  // For now, just total avg orders per customer in the dataset
+  const avgOrdersPerCustomer = customerCount > 0 ? (jobs.length / customerCount) : 0;
   
   return {
     totalJobs: jobs.length,
@@ -6679,7 +6694,9 @@ function calculateWholesaleSummary(jobs) {
     avgOverallGP: jobsWithActuals > 0 ? sumOverallGP / jobsWithActuals : 0,
     avgCupsGP: jobsWithActuals > 0 ? sumCupsGP / jobsWithActuals : 0,
     avgShippingGP: jobsWithActuals > 0 ? sumShippingGP / jobsWithActuals : 0,
-    jobsWithActuals
+    jobsWithActuals,
+    customerCount,
+    avgOrdersPerCustomer
   };
 }
 
