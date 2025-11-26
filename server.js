@@ -14,6 +14,13 @@ import fs from "fs";
 
 dotenv.config();
 
+// Wholesale profit data cache (15 minute TTL)
+const WHOLESALE_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const wholesaleCache = {
+  data: null,
+  lastUpdated: 0
+};
+
 // Environment variables with validation
 const {
   SHOPIFY_STORE_URL,
@@ -847,34 +854,8 @@ class HubSpotClient {
       
       dealScopedLog(dealId, `📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
 
+      // Use the invoice as-is (no dynamic refetch for performance)
       let invoice = invoiceResponse.data;
-
-      // Dynamic property discovery: if no address-like keys returned, refetch with all relevant props
-      const hasAddressLikeKey = (propsObj) => Object.keys(propsObj || {}).some(k =>
-        /address|address1|address_1|street|city|state|province|region|zip|postcode|postal|ship|bill|delivery/i.test(k)
-      );
-
-      if (!hasAddressLikeKey(invoice.properties)) {
-        try {
-          dealScopedLog(dealId, `🔎 No address-like keys on invoice. Discovering invoice properties...`);
-          const propsDef = await axios.get(`${this.baseURL}/crm/v3/properties/invoices`, { headers: this.headers });
-          const allNames = (propsDef.data?.results || []).map(p => p.name);
-          const wanted = allNames.filter(n => /address|address1|address_1|street|city|state|province|region|zip|postcode|postal|ship|bill|delivery|hs_tax_amount|hs_total_amount|hs_subtotal_amount|hs_discount_amount|hs_invoice_number|hs_currency/i.test(n));
-          if (wanted.length > 0) {
-            const refetch = await axios.get(
-              `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
-              {
-                headers: this.headers,
-                params: { properties: wanted.join(','), associations: 'line_items,quotes,companies,contacts' }
-              }
-            );
-            invoice = refetch.data;
-            dealScopedLog(dealId, `🔁 Refetched invoice with ${wanted.length} properties (dynamic)`);
-          }
-        } catch (discErr) {
-          dealScopedLog(dealId, `ℹ️ Invoice property discovery failed: ${discErr.message}`);
-        }
-      }
       
       // Get invoice line items
       const lineItemsResponse = await axios.get(
@@ -5628,11 +5609,8 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
       throw new Error('HubSpot client not initialized');
     }
 
-    console.log('📊 Fetching HubSpot deals for wholesale report...');
-
     // 1) Fetch all closed-won deals (already filtered by getDealsForAnalytics)
     const allDeals = await hubspotClient.getDealsForAnalytics(dateRange);
-    console.log(`📊 Processing ${allDeals.length} deals for wholesale invoices...`);
 
     const wholesaleJobs = [];
 
@@ -5649,7 +5627,6 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         let invoiceLineItems = [];
 
         if (!invoiceData) {
-          console.log(`ℹ️ No invoice data for deal ${dealId}, skipping`);
           continue;
         }
 
@@ -5663,28 +5640,10 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
         }
 
         if (!invoiceObj) {
-          console.log(`ℹ️ No invoice object for deal ${dealId}, skipping`);
           continue;
         }
 
-        // 3) Log invoice line items for debugging
-        if (invoiceLineItems && invoiceLineItems.length > 0) {
-          console.log(
-            '🧾 Invoice line items for deal',
-            dealId,
-            invoiceLineItems.slice(0, 10).map(li => ({
-              id: li.id,
-              name: li.properties?.name,
-              description: li.properties?.description,
-              sku: li.properties?.hs_sku,
-              product_id: li.properties?.hs_product_id,
-            }))
-          );
-        } else {
-          console.log('🧾 No invoice line items found for deal', dealId);
-        }
-
-        // 4) Log invoice status (do NOT filter by status for now)
+        // Get invoice status (do NOT filter by status for now)
         const rawStatus = (
           invoiceObj?.properties?.hs_status ||
           invoiceObj?.properties?.hs_invoice_status ||
@@ -5694,20 +5653,6 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           .toString()
           .toLowerCase()
           .trim();
-
-        if (!rawStatus) {
-          console.log(
-            `ℹ️ Invoice ${
-              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
-            } has NO status (including in report for now)`
-          );
-        } else {
-          console.log(
-            `ℹ️ Invoice ${
-              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
-            } status: ${rawStatus}`
-          );
-        }
 
         // 5) Simple wholesale rule:
         //    - any invoice that has a plate line item, OR
@@ -5735,16 +5680,7 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           return qty >= 10000 || textLooksTenK;
         });
 
-        console.log(
-          `🧮 Wholesale check for deal ${dealId}: hasPlateLineItem=${hasPlateLineItem}, hasTenKLineItem=${hasTenKLineItem}`
-        );
-
         if (!(hasPlateLineItem || hasTenKLineItem)) {
-          console.log(
-            `ℹ️ Deal ${dealId} invoice ${
-              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
-            } has no plate or 10k+ line item, skipping (not wholesale)`
-          );
           continue;
         }
 
@@ -5950,6 +5886,21 @@ function calculateWholesaleSummary(jobs) {
  */
 app.get('/wholesale-profit-data', async (req, res) => {
   try {
+    // 1) Try cache first (15 minute TTL)
+    const now = Date.now();
+    if (
+      wholesaleCache.data &&
+      now - wholesaleCache.lastUpdated < WHOLESALE_CACHE_TTL_MS
+    ) {
+      console.log('⚡ Returning cached wholesale data');
+      return res.json({
+        success: true,
+        cached: true,
+        ...wholesaleCache.data
+      });
+    }
+    
+    // 2) Cache miss or expired - fetch fresh data
     console.log('📊 Fetching wholesale profit data from HubSpot...');
     
     const dateRange = req.query.startDate && req.query.endDate ? {
@@ -5962,13 +5913,26 @@ app.get('/wholesale-profit-data', async (req, res) => {
     
     console.log(`✅ Wholesale data: ${jobs.length} jobs, ${summary.jobsWithActuals} with actuals`);
     
-    res.json({
+    // 3) Build response payload
+    const responsePayload = {
       success: true,
+      cached: false,
       jobs,
       summary,
       total_count: jobs.length,
       timestamp: new Date().toISOString()
-    });
+    };
+    
+    // 4) Save to in-memory cache
+    wholesaleCache.data = {
+      jobs,
+      summary,
+      total_count: jobs.length,
+      timestamp: responsePayload.timestamp
+    };
+    wholesaleCache.lastUpdated = Date.now();
+    
+    return res.json(responsePayload);
     
   } catch (error) {
     console.error('❌ Wholesale profit data error:', error.message);
@@ -5999,14 +5963,10 @@ app.post('/wholesale/actuals/bulk-save', express.json(), (req, res) => {
     actuals.forEach(item => {
       if (item.dealId && item.actuals) {
         wholesaleActualsDB[item.dealId] = {
-          actual_shipping_cost: parseFloat(item.actuals.actual_shipping_cost || 0),
+          supplier_total_cost_ex_gst: parseFloat(item.actuals.supplier_total_cost_ex_gst || 0),
+          actual_freight_cost_ex_gst: parseFloat(item.actuals.actual_freight_cost_ex_gst || 0),
+          over_under_cost_adjustment: parseFloat(item.actuals.over_under_cost_adjustment || 0),
           shipping_charged_to_customer: parseFloat(item.actuals.shipping_charged_to_customer || 0),
-          plate_fee_cost: parseFloat(item.actuals.plate_fee_cost || 0),
-          cups_cogs_total: parseFloat(item.actuals.cups_cogs_total || 0),
-          overprint_percent: parseFloat(item.actuals.overprint_percent || 0),
-          overprint_cost: parseFloat(item.actuals.overprint_cost || 0),
-          underprint_percent: parseFloat(item.actuals.underprint_percent || 0),
-          underprint_refund_amount: parseFloat(item.actuals.underprint_refund_amount || 0),
           notes: item.actuals.notes || '',
           updated_at: timestamp
         };
@@ -6016,7 +5976,11 @@ app.post('/wholesale/actuals/bulk-save', express.json(), (req, res) => {
     
     saveActualsDB();
     
-    console.log(`💾 Bulk saved ${saved} wholesale actuals`);
+    // Invalidate wholesale cache when actuals are updated
+    wholesaleCache.data = null;
+    wholesaleCache.lastUpdated = 0;
+    
+    console.log(`💾 Bulk saved ${saved} wholesale actuals (cache invalidated)`);
     
     res.json({
       success: true,
