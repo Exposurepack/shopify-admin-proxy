@@ -5667,20 +5667,24 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           continue;
         }
 
-        // 3) Log invoice line items for debugging (first 10)
-        console.log(
-          '🧾 Invoice line items for deal',
-          dealId,
-          invoiceLineItems.slice(0, 10).map(li => ({
-            id: li.id,
-            name: li.properties?.name,
-            description: li.properties?.description,
-            sku: li.properties?.hs_sku,
-            product_id: li.properties?.hs_product_id,
-          }))
-        );
+        // 3) Log invoice line items for debugging
+        if (invoiceLineItems && invoiceLineItems.length > 0) {
+          console.log(
+            '🧾 Invoice line items for deal',
+            dealId,
+            invoiceLineItems.slice(0, 10).map(li => ({
+              id: li.id,
+              name: li.properties?.name,
+              description: li.properties?.description,
+              sku: li.properties?.hs_sku,
+              product_id: li.properties?.hs_product_id,
+            }))
+          );
+        } else {
+          console.log('🧾 No invoice line items found for deal', dealId);
+        }
 
-        // 4) Filter by PAID / PARTIALLY PAID status only
+        // 4) Log invoice status (do NOT filter by status for now)
         const rawStatus = (
           invoiceObj?.properties?.hs_status ||
           invoiceObj?.properties?.hs_invoice_status ||
@@ -5691,39 +5695,58 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           .toLowerCase()
           .trim();
 
-        const isPaidStatus =
-          rawStatus === 'paid' ||
-          rawStatus === 'partially_paid' ||
-          rawStatus === 'partial';
-
-        if (!isPaidStatus) {
+        if (!rawStatus) {
           console.log(
-            `ℹ️ Skipping invoice ${
-              invoiceObj.id || invoiceObj.properties?.hs_object_id || 'unknown'
-            } due to status: '${rawStatus}'`
+            `ℹ️ Invoice ${
+              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
+            } has NO status (including in report for now)`
           );
-          continue;
+        } else {
+          console.log(
+            `ℹ️ Invoice ${
+              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
+            } status: ${rawStatus}`
+          );
         }
 
-        // 5) Filter by wholesale line items (invoice-based, not deal-based)
-        const wholesaleItems = invoiceLineItems.filter(item => {
+        // 5) Simple wholesale rule: any invoice that has a plate line item is wholesale
+        const hasPlateLineItem = invoiceLineItems.some(item => {
           const name = (item.properties?.name || '').toLowerCase();
           const description = (item.properties?.description || '').toLowerCase();
-          const sku = (item.properties?.hs_sku || '').toLowerCase();
           return (
-            name.includes('wholesale') ||
-            description.includes('wholesale') ||
-            sku.includes('wholesale')
+            name.includes('plate') ||
+            description.includes('plate')
           );
         });
 
-        if (wholesaleItems.length === 0) {
-          console.log(`ℹ️ Deal ${dealId} has no wholesale invoice items, skipping`);
+        console.log(
+          `🧮 Wholesale check for deal ${dealId}: hasPlateLineItem=${hasPlateLineItem}`
+        );
+
+        if (!hasPlateLineItem) {
+          console.log(
+            `ℹ️ Deal ${dealId} invoice ${
+              invoiceObj?.id || invoiceObj?.properties?.hs_object_id || 'unknown'
+            } has no plate line item, skipping (not wholesale)`
+          );
           continue;
         }
 
+        // Cup items: everything that's not a plate and not shipping
+        const cupItems = invoiceLineItems.filter(item => {
+          const name = (item.properties?.name || '').toLowerCase();
+          const description = (item.properties?.description || '').toLowerCase();
+          const isPlate =
+            name.includes('plate') ||
+            description.includes('plate');
+          const isShipping =
+            name.includes('shipping') ||
+            description.includes('shipping');
+          return !isPlate && !isShipping;
+        });
+
         // 6) Revenue calculations from invoice line items
-        const cupsRevenue = wholesaleItems.reduce((sum, item) => {
+        const cupsRevenue = cupItems.reduce((sum, item) => {
           const quantity = parseInt(item.properties?.quantity || 0, 10);
           const price = parseFloat(item.properties?.price || 0);
           return sum + quantity * price;
@@ -5784,7 +5807,7 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           currency: invoiceObj?.properties?.hs_currency || 'AUD',
 
           // Wholesale invoice line items
-          line_items: wholesaleItems.map(item => ({
+          line_items: cupItems.map(item => ({
             name: item.properties?.name || '',
             description: item.properties?.description || '',
             quantity: parseInt(item.properties?.quantity || 0, 10),
