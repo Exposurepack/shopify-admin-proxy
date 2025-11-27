@@ -11,6 +11,7 @@ import session from "express-session";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import fs from "fs";
+import HubSpotRateLimitedClient from "./lib/hubspotRateLimitedClient.js";
 
 dotenv.config();
 
@@ -802,84 +803,71 @@ class HubSpotClient {
   async getDealInvoices(dealId) {
     try {
       dealScopedLog(dealId, `🔍 Fetching invoices for deal ${dealId}...`);
-      // First, get invoices associated with the deal
-      const response = await axios.get(
-        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/invoices`,
-        {
-          headers: this.headers,
-          timeout: 30000
-        }
+      // First, get invoices associated with the deal (using rate-limited client)
+      const response = await hubspotRateLimited.get(
+        `/crm/v3/objects/deals/${dealId}/associations/invoices`
       );
       
-      dealScopedLog(dealId, `📊 Invoice association response:`, JSON.stringify(response.data, null, 2));
+      dealScopedLog(dealId, `📊 Invoice association response:`, JSON.stringify(response, null, 2));
       
-      if (!response.data.results || response.data.results.length === 0) {
+      if (!response.results || response.results.length === 0) {
         dealScopedLog(dealId, `ℹ️ No invoices found for deal ${dealId} - falling back to deal line items`);
         const fallbackItems = await this.getDealLineItems(dealId);
         return Array.isArray(fallbackItems) ? fallbackItems : [];
       }
 
       // Get the most recent invoice (or first one)
-      const invoiceId = response.data.results[0].id;
+      const invoiceId = response.results[0].id;
       dealScopedLog(dealId, `📄 Processing invoice ID: ${invoiceId}`);
       
-      // Fetch ALL invoice properties to see what's actually available
-      const invoiceResponse = await axios.get(
-        `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}`,
+      // Fetch ALL invoice properties to see what's actually available (using rate-limited client)
+      const invoiceResponse = await hubspotRateLimited.get(
+        `/crm/v3/objects/invoices/${invoiceId}`,
         {
-          headers: this.headers,
-          params: {
-            properties: [
-              // Basic invoice properties (restore working functionality)
-              'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id',
-              'hs_tax_amount', 'hs_subtotal_amount', 'hs_total_amount', 'hs_discount_amount',
-              'hs_invoice_number', 'hs_status',
-              // Add common invoice address field patterns
-              'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_zip',
-              'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_zip',
-              'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
-              'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
-              'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
-              'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip',
-              // System-prefixed variants
-              'hs_ship_to_address', 'hs_ship_to_address_2', 'hs_ship_to_city', 'hs_ship_to_state', 'hs_ship_to_zip', 'hs_ship_to_country',
-              'hs_bill_to_address', 'hs_bill_to_address_2', 'hs_bill_to_city', 'hs_bill_to_state', 'hs_bill_to_zip', 'hs_bill_to_country',
-              'hs_shipping_address', 'hs_shipping_address_2', 'hs_shipping_city', 'hs_shipping_state', 'hs_shipping_zip', 'hs_shipping_country',
-              'hs_billing_address', 'hs_billing_address_2', 'hs_billing_city', 'hs_billing_state', 'hs_billing_zip', 'hs_billing_country'
-            ].join(','),
-            associations: 'line_items,quotes,companies,contacts'
-          }
+          properties: [
+            // Basic invoice properties (restore working functionality)
+            'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id',
+            'hs_tax_amount', 'hs_subtotal_amount', 'hs_total_amount', 'hs_discount_amount',
+            'hs_invoice_number', 'hs_status',
+            // Add common invoice address field patterns
+            'ship_to_address', 'ship_to_street', 'ship_to_city', 'ship_to_state', 'ship_to_zip',
+            'bill_to_address', 'bill_to_street', 'bill_to_city', 'bill_to_state', 'bill_to_zip',
+            'shipping_address', 'shipping_street', 'shipping_city', 'shipping_state', 'shipping_zip',
+            'billing_address', 'billing_street', 'billing_city', 'billing_state', 'billing_zip',
+            'delivery_address', 'delivery_street', 'delivery_city', 'delivery_state', 'delivery_zip',
+            'customer_address', 'customer_street', 'customer_city', 'customer_state', 'customer_zip',
+            // System-prefixed variants
+            'hs_ship_to_address', 'hs_ship_to_address_2', 'hs_ship_to_city', 'hs_ship_to_state', 'hs_ship_to_zip', 'hs_ship_to_country',
+            'hs_bill_to_address', 'hs_bill_to_address_2', 'hs_bill_to_city', 'hs_bill_to_state', 'hs_bill_to_zip', 'hs_bill_to_country',
+            'hs_shipping_address', 'hs_shipping_address_2', 'hs_shipping_city', 'hs_shipping_state', 'hs_shipping_zip', 'hs_shipping_country',
+            'hs_billing_address', 'hs_billing_address_2', 'hs_billing_city', 'hs_billing_state', 'hs_billing_zip', 'hs_billing_country'
+          ].join(','),
+          associations: 'line_items,quotes,companies,contacts'
         }
       );
       
-      dealScopedLog(dealId, `📄 Invoice details response:`, JSON.stringify(invoiceResponse.data, null, 2));
+      dealScopedLog(dealId, `📄 Invoice details response:`, JSON.stringify(invoiceResponse, null, 2));
 
       // Use the invoice as-is (no dynamic refetch for performance)
-      let invoice = invoiceResponse.data;
+      let invoice = invoiceResponse;
       
-      // Get invoice line items
-      const lineItemsResponse = await axios.get(
-        `${this.baseURL}/crm/v3/objects/invoices/${invoiceId}/associations/line_items`,
-        {
-          headers: this.headers,
-          timeout: 30000
-        }
+      // Get invoice line items (using rate-limited client)
+      const lineItemsResponse = await hubspotRateLimited.get(
+        `/crm/v3/objects/invoices/${invoiceId}/associations/line_items`
       );
 
-      if (!lineItemsResponse.data.results || lineItemsResponse.data.results.length === 0) {
+      if (!lineItemsResponse.results || lineItemsResponse.results.length === 0) {
         dealScopedLog(dealId, `ℹ️ No line items found for invoice ${invoiceId}`);
         return [];
       }
 
-      // Fetch detailed line item data
-      const lineItemPromises = lineItemsResponse.data.results.map(async (association) => {
-        const lineItemResponse = await axios.get(
-          `${this.baseURL}/crm/v3/objects/line_items/${association.id}`,
+      // Fetch detailed line item data (using rate-limited client)
+      const lineItemPromises = lineItemsResponse.results.map(async (association) => {
+        const lineItemResponse = await hubspotRateLimited.get(
+          `/crm/v3/objects/line_items/${association.id}`,
           {
-            headers: this.headers,
-            params: {
-              properties: [
-                'name',
+            properties: [
+              'name',
                 'quantity',
                 'price',
                 'amount',
@@ -888,9 +876,8 @@ class HubSpotClient {
                 'hs_sku'
               ].join(',')
             }
-          }
         );
-        return lineItemResponse.data;
+        return lineItemResponse;
       });
 
       const lineItems = await Promise.all(lineItemPromises);
@@ -958,43 +945,36 @@ class HubSpotClient {
 
   async getDealLineItems(dealId) {
     try {
-      const response = await axios.get(
-        `${this.baseURL}/crm/v3/objects/deals/${dealId}/associations/line_items`,
-        {
-          headers: this.headers,
-          timeout: 30000
-        }
+      const response = await hubspotRateLimited.get(
+        `/crm/v3/objects/deals/${dealId}/associations/line_items`
       );
       
-      if (!response.data.results || response.data.results.length === 0) {
+      if (!response.results || response.results.length === 0) {
         return [];
       }
 
-      // Fetch detailed line item data
-      const lineItemPromises = response.data.results.map(async (association) => {
-        const lineItemResponse = await axios.get(
-          `${this.baseURL}/crm/v3/objects/line_items/${association.id}`,
+      // Fetch detailed line item data (using rate-limited client)
+      const lineItemPromises = response.results.map(async (association) => {
+        const lineItemResponse = await hubspotRateLimited.get(
+          `/crm/v3/objects/line_items/${association.id}`,
           {
-            headers: this.headers,
-            params: {
-              properties: [
-                'name',
-                'quantity',
-                'price',
-                'amount',
-                'hs_product_id',
-                'description',
-                'hs_sku'
-              ].join(',')
-            }
+            properties: [
+              'name',
+              'quantity',
+              'price',
+              'amount',
+              'hs_product_id',
+              'description',
+              'hs_sku'
+            ].join(',')
           }
         );
-        return lineItemResponse.data;
+        return lineItemResponse;
       });
 
       return await Promise.all(lineItemPromises);
     } catch (error) {
-      console.warn(`⚠️ Failed to fetch deal line items for deal ${dealId}:`, error.response?.data?.message || error.message);
+      console.warn(`⚠️ Failed to fetch deal line items for deal ${dealId}:`, error.message);
       return [];
     }
   }
@@ -2658,12 +2638,14 @@ const restClient = new ShopifyRESTClient();
 const metafieldManager = new MetafieldManager(graphqlClient);
 const fileUploadManager = new FileUploadManager(graphqlClient);
 
-// Initialize HubSpot client only if token is available
+// Initialize HubSpot clients only if token is available
 let hubspotClient = null;
+let hubspotRateLimited = null;
 if (HUBSPOT_PRIVATE_APP_TOKEN) {
   try {
     hubspotClient = new HubSpotClient();
-    console.log("✅ HubSpot client initialized successfully");
+    hubspotRateLimited = new HubSpotRateLimitedClient(HUBSPOT_PRIVATE_APP_TOKEN);
+    console.log("✅ HubSpot client initialized successfully (with rate limiting)");
   } catch (error) {
     console.error("❌ Failed to initialize HubSpot client:", error.message);
   }
@@ -5731,15 +5713,12 @@ async function getAllWholesaleInvoices(dateRange = null) {
           contactId = contactAssociations[0].id;
           
           try {
-            const contactResponse = await axios.get(
-              `https://api.hubapi.com/crm/v3/objects/contacts/${contactId}`,
+            const contactResponse = await hubspotRateLimited.get(
+              `/crm/v3/objects/contacts/${contactId}`,
               {
-                headers: hubspotClient.headers,
-                params: {
-                  properties: 'email,phone,firstname,lastname,mobilephone'
-                }
+                properties: 'email,phone,firstname,lastname,mobilephone'
               }
-            ).then(res => res.data);
+            );
             
             const contactProps = contactResponse.properties || {};
             contactEmail = contactProps.email || null;
@@ -5829,18 +5808,15 @@ async function getAllWholesaleInvoices(dateRange = null) {
 
     do {
       pageCount++;
-      const response = await axios.get(
-        'https://api.hubapi.com/crm/v3/objects/invoices',
+      const response = await hubspotRateLimited.get(
+        '/crm/v3/objects/invoices',
         {
-          headers: hubspotClient.headers,
-          params: {
-            limit: 100,
-            after: after,
-            properties: 'hs_object_id,hs_createdate,hs_lastmodifieddate,hs_status,hs_invoice_status,hs_payment_status,hs_currency,hs_customer_name,hs_billing_name,hs_company_name,hs_business_name,hs_recipient_company_name,hs_recipient_shipping_name',
-            associations: 'line_items,deals,contacts'
-          }
+          limit: 100,
+          after: after,
+          properties: 'hs_object_id,hs_createdate,hs_lastmodifieddate,hs_status,hs_invoice_status,hs_payment_status,hs_currency,hs_customer_name,hs_billing_name,hs_company_name,hs_business_name,hs_recipient_company_name,hs_recipient_shipping_name',
+          associations: 'line_items,deals,contacts'
         }
-      ).then(res => res.data);
+      );
 
       totalInvoices += response.results.length;
 
@@ -5863,14 +5839,13 @@ async function getAllWholesaleInvoices(dateRange = null) {
           if (lineItemAssociations.length === 0) continue;
 
           const lineItemIds = lineItemAssociations.map(a => a.id);
-          const lineItemsResponse = await axios.post(
-            'https://api.hubapi.com/crm/v3/objects/line_items/batch/read',
+          const lineItemsResponse = await hubspotRateLimited.post(
+            '/crm/v3/objects/line_items/batch/read',
             {
               properties: ['name', 'description', 'quantity', 'price', 'amount', 'hs_sku', 'hs_discount_percentage'],
               inputs: lineItemIds.map(id => ({ id }))
-            },
-            { headers: hubspotClient.headers }
-          ).then(res => res.data);
+            }
+          );
 
           const invoiceLineItems = lineItemsResponse.results || [];
 
