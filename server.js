@@ -5747,7 +5747,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
             
             if (contactProps.firstname || contactProps.lastname) {
               const fullName = [contactProps.firstname, contactProps.lastname].filter(Boolean).join(' ');
-              if (fullName && customerName === 'Unknown') {
+              if (fullName) {
                 customerName = fullName;
               }
             }
@@ -5969,7 +5969,7 @@ async function getAllWholesaleInvoices(dateRange = null) {
               
               if (contactProps.firstname || contactProps.lastname) {
                 const fullName = [contactProps.firstname, contactProps.lastname].filter(Boolean).join(' ');
-                if (fullName && customerName === 'Unknown') {
+                if (fullName) {
                   customerName = fullName;
                 }
               }
@@ -6286,13 +6286,15 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
           invoiceObj?.properties?.company_name ||
           'Unknown';
 
-        // Get actuals from database (simplified 3-field model)
-        const actuals = wholesaleActualsDB[dealId] || {
-          supplier_total_cost_ex_gst: 0,
-          actual_freight_cost_ex_gst: 0,
-          over_under_cost_adjustment: 0,
+        // Get actuals from database (4-field model)
+        const savedActuals = wholesaleActualsDB[dealId] || {};
+        const actuals = {
+          supplier_total_cost_ex_gst: savedActuals.supplier_total_cost_ex_gst || 0,
+          actual_freight_cost_ex_gst: savedActuals.actual_freight_cost_ex_gst || 0,
+          overprint_cost_ex_gst: savedActuals.overprint_cost_ex_gst || 0,
+          underprint_refund_ex_gst: savedActuals.underprint_refund_ex_gst || 0,
           shipping_charged_to_customer: shippingCharged,
-          notes: ''
+          notes: savedActuals.notes || ''
         };
 
         const job = {
@@ -6334,21 +6336,26 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
           actuals
         };
 
-        // Calculated fields - simplified cost model
+        // Calculated fields - 4-field cost model
+        // Underprint refund reduces revenue
+        const adjustedRevenue = (job.total_revenue_ex_gst || 0) - (actuals.underprint_refund_ex_gst || 0);
+        const adjustedCupsRevEx = (job.cups_revenue_ex_gst || 0) - (actuals.underprint_refund_ex_gst || 0);
+        
+        // Total cost = supplier + freight + overprint (overprint is absorbed cost)
         const totalActualCost =
           actuals.supplier_total_cost_ex_gst +
           actuals.actual_freight_cost_ex_gst +
-          actuals.over_under_cost_adjustment;
+          actuals.overprint_cost_ex_gst;
 
-        const cupsRevEx = job.cups_revenue_ex_gst || 0;
-        const profit = job.total_revenue_ex_gst - totalActualCost;
+        const profit = adjustedRevenue - totalActualCost;
 
         job.calculated = {
           total_actual_cost: totalActualCost,
           profit: profit,
+          adjusted_revenue_ex_gst: adjustedRevenue,
           overall_gp_percent:
-            job.total_revenue_ex_gst > 0
-              ? (profit / job.total_revenue_ex_gst) * 100
+            adjustedRevenue > 0
+              ? (profit / adjustedRevenue) * 100
               : 0,
           shipping_gp_percent:
             actuals.shipping_charged_to_customer > 0 && actuals.actual_freight_cost_ex_gst > 0
@@ -6356,8 +6363,8 @@ async function getWholesaleHubSpotInvoicesStreaming(dateRange = null, onJobFound
                   actuals.shipping_charged_to_customer) * 100
               : 0,
           cups_gp_percent:
-            cupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
-              ? ((cupsRevEx - actuals.supplier_total_cost_ex_gst) / cupsRevEx) * 100
+            adjustedCupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
+              ? ((adjustedCupsRevEx - actuals.supplier_total_cost_ex_gst) / adjustedCupsRevEx) * 100
               : 0
         };
 
@@ -6532,13 +6539,15 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           props.dealname ||
           'Unknown';
 
-        // Get actuals from database (simplified 3-field model)
-        const actuals = wholesaleActualsDB[dealId] || {
-          supplier_total_cost_ex_gst: 0,
-          actual_freight_cost_ex_gst: 0,
-          over_under_cost_adjustment: 0,
+        // Get actuals from database (4-field model)
+        const savedActuals = wholesaleActualsDB[dealId] || {};
+        const actuals = {
+          supplier_total_cost_ex_gst: savedActuals.supplier_total_cost_ex_gst || 0,
+          actual_freight_cost_ex_gst: savedActuals.actual_freight_cost_ex_gst || 0,
+          overprint_cost_ex_gst: savedActuals.overprint_cost_ex_gst || 0,
+          underprint_refund_ex_gst: savedActuals.underprint_refund_ex_gst || 0,
           shipping_charged_to_customer: shippingCharged,
-          notes: ''
+          notes: savedActuals.notes || ''
         };
 
         const job = {
@@ -6580,21 +6589,26 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
           actuals
         };
 
-        // Calculated fields - simplified cost model
+        // Calculated fields - 4-field cost model
+        // Underprint refund reduces revenue
+        const adjustedRevenue = (job.total_revenue_ex_gst || 0) - (actuals.underprint_refund_ex_gst || 0);
+        const adjustedCupsRevEx = (job.cups_revenue_ex_gst || 0) - (actuals.underprint_refund_ex_gst || 0);
+        
+        // Total cost = supplier + freight + overprint (overprint is absorbed cost)
         const totalActualCost =
           actuals.supplier_total_cost_ex_gst +
           actuals.actual_freight_cost_ex_gst +
-          actuals.over_under_cost_adjustment;
+          actuals.overprint_cost_ex_gst;
 
-        const cupsRevEx = job.cups_revenue_ex_gst || 0;
-        const profit = job.total_revenue_ex_gst - totalActualCost;
+        const profit = adjustedRevenue - totalActualCost;
 
         job.calculated = {
           total_actual_cost: totalActualCost,
           profit: profit,
+          adjusted_revenue_ex_gst: adjustedRevenue,
           overall_gp_percent:
-            job.total_revenue_ex_gst > 0
-              ? (profit / job.total_revenue_ex_gst) * 100
+            adjustedRevenue > 0
+              ? (profit / adjustedRevenue) * 100
               : 0,
           shipping_gp_percent:
             actuals.shipping_charged_to_customer > 0 && actuals.actual_freight_cost_ex_gst > 0
@@ -6602,8 +6616,8 @@ async function getWholesaleHubSpotInvoices(dateRange = null) {
                   actuals.shipping_charged_to_customer) * 100
               : 0,
           cups_gp_percent:
-            cupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
-              ? ((cupsRevEx - actuals.supplier_total_cost_ex_gst) / cupsRevEx) * 100
+            adjustedCupsRevEx > 0 && actuals.supplier_total_cost_ex_gst > 0
+              ? ((adjustedCupsRevEx - actuals.supplier_total_cost_ex_gst) / adjustedCupsRevEx) * 100
               : 0
         };
 
@@ -6826,7 +6840,8 @@ app.post('/wholesale/actuals/bulk-save', express.json(), (req, res) => {
         wholesaleActualsDB[item.dealId] = {
           supplier_total_cost_ex_gst: parseFloat(item.actuals.supplier_total_cost_ex_gst || 0),
           actual_freight_cost_ex_gst: parseFloat(item.actuals.actual_freight_cost_ex_gst || 0),
-          over_under_cost_adjustment: parseFloat(item.actuals.over_under_cost_adjustment || 0),
+          overprint_cost_ex_gst: parseFloat(item.actuals.overprint_cost_ex_gst || 0),
+          underprint_refund_ex_gst: parseFloat(item.actuals.underprint_refund_ex_gst || 0),
           shipping_charged_to_customer: parseFloat(item.actuals.shipping_charged_to_customer || 0),
           notes: item.actuals.notes || '',
           updated_at: timestamp
@@ -6869,7 +6884,7 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
     
     const jobs = await getAllWholesaleInvoices();
     
-    // Build CSV - simplified 3-field cost model
+    // Build CSV - 4-field cost model
     const headers = [
       'Date',
       'Deal ID',
@@ -6881,7 +6896,8 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
       'Total Revenue (Ex GST)',
       'Supplier Total Cost (Ex GST)',
       'Actual Freight Cost (Ex GST)',
-      'Over/Under Adjustment (Ex GST)',
+      'Overprint Cost (Ex GST)',
+      'Underprint Refund (Ex GST)',
       'Total Actual Cost',
       'Profit',
       'Overall GP %',
@@ -6905,7 +6921,8 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
         (job.total_revenue_ex_gst || 0).toFixed(2),
         (actuals.supplier_total_cost_ex_gst || 0).toFixed(2),
         (actuals.actual_freight_cost_ex_gst || 0).toFixed(2),
-        (actuals.over_under_cost_adjustment || 0).toFixed(2),
+        (actuals.overprint_cost_ex_gst || 0).toFixed(2),
+        (actuals.underprint_refund_ex_gst || 0).toFixed(2),
         (calc.total_actual_cost || 0).toFixed(2),
         (calc.profit || 0).toFixed(2),
         (calc.overall_gp_percent || 0).toFixed(2),
