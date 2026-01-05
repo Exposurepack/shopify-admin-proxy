@@ -1729,6 +1729,335 @@ async function createHubSpotDealFromShopifyOrder(order) {
   }
 }
 
+// ==================================================
+// HubSpot Invoice creation from Shopify paid orders
+// Goal: match Shopify totals perfectly and mark invoice as PAID
+// ==================================================
+const money2 = (n) => Math.round((Number(n) || 0) * 100) / 100; 
+
+async function getInvoicePropertyMeta(propertyName) {
+  try {
+    return await hubspotRateLimited.get(`/crm/v3/properties/invoices/${propertyName}`);
+  } catch (e) {
+    return null;
+  }
+}
+
+const hubspotInvoicePaidCache = {
+  resolvedAt: 0,
+  props: {} // { hs_status: '...', hs_invoice_status: '...', hs_payment_status: '...' }
+};
+
+async function resolveInvoicePaidValues() {
+  // Cache for 24h; HubSpot enums won't change frequently.
+  const now = Date.now();
+  if (hubspotInvoicePaidCache.resolvedAt && (now - hubspotInvoicePaidCache.resolvedAt) < (24 * 60 * 60 * 1000)) {
+    return hubspotInvoicePaidCache.props;
+  }
+
+  const candidates = ['hs_status', 'hs_invoice_status', 'hs_payment_status'];
+  const out = {};
+
+  for (const propName of candidates) {
+    const meta = await getInvoicePropertyMeta(propName);
+    if (!meta) continue; // property not available in this portal
+
+    const options = Array.isArray(meta.options) ? meta.options : [];
+    const paidOpt = options.find(o =>
+      String(o?.label || '').toLowerCase().includes('paid') ||
+      String(o?.value || '').toLowerCase().includes('paid')
+    );
+    // If it's an enum, prefer the discovered value; otherwise fall back to a common string.
+    out[propName] = paidOpt?.value || 'PAID';
+  }
+
+  hubspotInvoicePaidCache.resolvedAt = now;
+  hubspotInvoicePaidCache.props = out;
+  return out;
+}
+
+const assocTypeCache = new Map(); // key `${from}:${to}` -> associationTypeId
+async function getAssociationTypeId(from, to) {
+  const key = `${String(from)}:${String(to)}`;
+  if (assocTypeCache.has(key)) return assocTypeCache.get(key);
+
+  // Discover association type IDs via v4 labels (portal-specific IDs)
+  try {
+    const res = await hubspotRateLimited.get(`/crm/v4/associations/${from}/${to}/labels`);
+    const first = (res?.results || [])[0];
+    const id = first?.associationTypeId;
+    if (id) {
+      assocTypeCache.set(key, id);
+      return id;
+    }
+  } catch (_) {
+    // fall through to env override
+  }
+
+  // Optional fallbacks if the v4 labels endpoint is blocked in a given portal
+  if (from === 'line_items' && to === 'invoices' && process.env.HUBSPOT_ASSOC_LINEITEM_INVOICE_TYPE_ID) {
+    const id = Number(process.env.HUBSPOT_ASSOC_LINEITEM_INVOICE_TYPE_ID);
+    if (Number.isFinite(id)) {
+      assocTypeCache.set(key, id);
+      return id;
+    }
+  }
+  if (from === 'invoices' && to === 'deals' && process.env.HUBSPOT_ASSOC_INVOICE_DEAL_TYPE_ID) {
+    const id = Number(process.env.HUBSPOT_ASSOC_INVOICE_DEAL_TYPE_ID);
+    if (Number.isFinite(id)) {
+      assocTypeCache.set(key, id);
+      return id;
+    }
+  }
+
+  throw new Error(`Unable to resolve HubSpot association typeId for ${from} -> ${to}`);
+}
+
+async function associateObjects(from, fromId, to, toId) {
+  const typeId = await getAssociationTypeId(from, to);
+  await hubspotRateLimited.put(`/crm/v3/objects/${from}/${fromId}/associations/${to}/${toId}/${typeId}`, {});
+}
+
+async function createHubSpotInvoiceSafe(invoiceProps) {
+  try {
+    return await hubspotRateLimited.post('/crm/v3/objects/invoices', { properties: invoiceProps });
+  } catch (error) {
+    const data = error.response?.data;
+    // Extract unsupported property names from common HubSpot error shapes or message string
+    const collect = (arr) => (Array.isArray(arr) ? arr.map(e => e?.name || e?.field || e?.property || e?.context?.propertyName).filter(Boolean) : []);
+    let missing = collect(data?.errors);
+    if (!missing.length) missing = collect(data?.validationResults);
+    if (!missing.length && typeof data?.message === 'string') {
+      const guesses = [];
+      const re1 = /"name":"(.*?)"/g;
+      const re2 = /Property\s+"(.*?)"\s+does not exist/g;
+      let m;
+      while ((m = re1.exec(data.message))) guesses.push(m[1]);
+      while ((m = re2.exec(data.message))) guesses.push(m[1]);
+      missing = Array.from(new Set(guesses));
+    }
+
+    if (!missing.length) throw error;
+
+    const sanitized = { ...invoiceProps };
+    missing.forEach(n => { try { delete sanitized[n]; } catch (_) {} });
+    console.warn(`⚠️ Retrying invoice create without unsupported properties: ${missing.join(', ')}`);
+    return await hubspotRateLimited.post('/crm/v3/objects/invoices', { properties: sanitized });
+  }
+}
+
+async function createPaidHubSpotInvoiceFromShopifyOrder(order, deal) {
+  if (!HUBSPOT_PRIVATE_APP_TOKEN || !hubspotClient || !hubspotRateLimited) {
+    console.log("⚠️ HubSpot not configured - cannot create invoice");
+    return null;
+  }
+
+  const numericOrderId = order.id;
+
+  // Idempotency: if Shopify order already has hubspot_invoice_id, skip
+  let existingNotes = [];
+  try {
+    const res = await restClient.get(`/orders/${numericOrderId}.json?fields=id,note_attributes`);
+    existingNotes = Array.isArray(res?.order?.note_attributes) ? res.order.note_attributes : [];
+    const existingInvoice = existingNotes.find(na => String(na?.name || '').toLowerCase() === 'hubspot_invoice_id');
+    if (existingInvoice?.value) {
+      console.log(`🧾 Shopify order ${order.name} already has hubspot_invoice_id=${existingInvoice.value}. Skipping invoice creation.`);
+      return { id: String(existingInvoice.value), skipped: true };
+    }
+  } catch (e) {
+    console.warn(`⚠️ Could not read Shopify order note_attributes for invoice idempotency:`, e.message);
+  }
+
+  // Partition line items: treat “shipping/freight” line items as shipping components
+  const allLineItems = Array.isArray(order.line_items) ? order.line_items : [];
+  const isShippingish = (t) => /shipping|freight/i.test(String(t || ''));
+  const shippingLineItems = allLineItems.filter(li => isShippingish(li.title || li.name));
+  const productLineItems = allLineItems.filter(li => !isShippingish(li.title || li.name));
+
+  const lineNet = (li) => {
+    const qty = parseInt(li?.quantity, 10) || 1;
+    const unitGross = money2(li?.price);
+    const gross = money2(unitGross * qty);
+    const disc = money2(li?.total_discount);
+    return money2(gross - disc);
+  };
+
+  // Shopify totals (source of truth)
+  const currency = order.currency || 'AUD';
+  const totalInc = money2(order.total_price);
+  const tax = money2(order.total_tax);
+  const preTax = money2(totalInc - tax);
+  const discounts = money2(order.total_discounts);
+  const shopifyShippingAmount = money2(order.total_shipping_price_set?.shop_money?.amount);
+  const shippingLineItemsNetTotal = money2(shippingLineItems.reduce((sum, li) => sum + lineNet(li), 0));
+  let shippingTotal = money2(shopifyShippingAmount + shippingLineItemsNetTotal);
+  const productsTotal = money2(productLineItems.reduce((sum, li) => sum + lineNet(li), 0));
+
+  // Ensure pre-tax sum matches Shopify exactly (adjust shipping or add adjustment line)
+  let adjustmentPreTax = 0;
+  const computedPreTax = money2(productsTotal + shippingTotal);
+  const deltaPreTax = money2(preTax - computedPreTax);
+  if (Math.abs(deltaPreTax) >= 0.01) {
+    // Prefer absorbing into shipping line if possible
+    if (shippingTotal !== 0 || deltaPreTax > 0) {
+      shippingTotal = money2(shippingTotal + deltaPreTax);
+    } else {
+      adjustmentPreTax = deltaPreTax;
+    }
+  }
+
+  console.log(`🧾 [Invoice] Shopify total=${totalInc} tax=${tax} preTax=${preTax} discounts=${discounts} currency=${currency}`);
+  console.log(`🧾 [Invoice] Computed products=${productsTotal} shipping=${shippingTotal} adj=${adjustmentPreTax} preTax=${money2(productsTotal + shippingTotal + adjustmentPreTax)}`);
+
+  // Build invoice properties to match Shopify totals
+  const paidProps = await resolveInvoicePaidValues();
+  const invoiceProps = {
+    hs_currency: currency,
+    hs_total_amount: totalInc,
+    hs_tax_amount: tax,
+    hs_subtotal_amount: preTax,
+    hs_discount_amount: discounts,
+    shopify_order_id: String(order.id),
+    shopify_order_number: String(order.name),
+    deal_source: 'shopify_webhook_paid',
+    ...paidProps
+  };
+
+  const invoice = await createHubSpotInvoiceSafe(invoiceProps);
+  if (!invoice?.id) throw new Error('HubSpot invoice create failed (no id returned)');
+  console.log(`✅ Created HubSpot invoice ${invoice.id} for Shopify order ${order.name}`);
+
+  // Associate invoice -> deal
+  if (deal?.id) {
+    try {
+      await associateObjects('invoices', invoice.id, 'deals', deal.id);
+      console.log(`🔗 Associated invoice ${invoice.id} with deal ${deal.id}`);
+    } catch (e) {
+      console.warn(`⚠️ Failed to associate invoice ${invoice.id} with deal ${deal.id}:`, e.message);
+    }
+  }
+
+  // Patch paid again (some portals ignore status on create); only patch properties we resolved
+  const paidPatch = { ...paidProps };
+  if (Object.keys(paidPatch).length > 0) {
+    try {
+      await hubspotRateLimited.patch(`/crm/v3/objects/invoices/${invoice.id}`, { properties: paidPatch });
+    } catch (e) {
+      console.warn(`⚠️ Failed to patch invoice ${invoice.id} to paid status:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  // Create/associate invoice line items: products + shipping + GST (+ optional adjustment)
+  const createdLineSums = { products: 0, shipping: 0, tax: 0, adjustment: 0 };
+
+  for (let i = 0; i < productLineItems.length; i++) {
+    const li = productLineItems[i];
+    const qty = parseInt(li?.quantity, 10) || 1;
+    const net = lineNet(li);
+    if (net === 0) continue;
+    const unitNet = money2(net / qty);
+    try {
+      const created = await hubspotClient.createLineItem({
+        name: li.title || li.name || `Item ${i + 1}`,
+        quantity: qty,
+        price: unitNet,
+        amount: net,
+        hs_sku: li.sku || li.variant_id || `SHOPIFY-${li.id}`,
+        description: `Shopify line item\nOrder: ${order.name}\nGross: ${money2(money2(li?.price) * qty)}\nDiscount: ${money2(li?.total_discount)}\nNet: ${net}`
+      });
+      if (created?.id) await associateObjects('line_items', created.id, 'invoices', invoice.id);
+      createdLineSums.products = money2(createdLineSums.products + net);
+    } catch (e) {
+      console.warn(`⚠️ Failed to create/associate product line item for invoice ${invoice.id}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  if (shippingTotal !== 0) {
+    const method = order.shipping_lines?.[0]?.title || (shippingLineItems?.[0]?.title || shippingLineItems?.[0]?.name) || 'Shipping';
+    try {
+      const createdShip = await hubspotClient.createLineItem({
+        name: `Shipping - ${method}`,
+        quantity: 1,
+        price: shippingTotal,
+        amount: shippingTotal,
+        hs_sku: 'SHOPIFY-SHIPPING',
+        description: `Shopify shipping\nOrder: ${order.name}\nshipping_lines: ${shopifyShippingAmount}\nshipping line_items: ${shippingLineItemsNetTotal}\nTotal shipping: ${shippingTotal}`
+      });
+      if (createdShip?.id) await associateObjects('line_items', createdShip.id, 'invoices', invoice.id);
+      createdLineSums.shipping = money2(createdLineSums.shipping + shippingTotal);
+    } catch (e) {
+      console.warn(`⚠️ Failed to create/associate shipping line item for invoice ${invoice.id}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  if (adjustmentPreTax !== 0) {
+    try {
+      const createdAdj = await hubspotClient.createLineItem({
+        name: 'Order Adjustment',
+        quantity: 1,
+        price: adjustmentPreTax,
+        amount: adjustmentPreTax,
+        hs_sku: 'SHOPIFY-ADJUSTMENT',
+        description: `Adjustment to match Shopify pre-tax total\nOrder: ${order.name}\nAdjustment: ${adjustmentPreTax}`
+      });
+      if (createdAdj?.id) await associateObjects('line_items', createdAdj.id, 'invoices', invoice.id);
+      createdLineSums.adjustment = money2(createdLineSums.adjustment + adjustmentPreTax);
+    } catch (e) {
+      console.warn(`⚠️ Failed to create/associate adjustment line item for invoice ${invoice.id}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  if (tax !== 0) {
+    try {
+      const createdTax = await hubspotClient.createLineItem({
+        name: 'GST (Tax)',
+        quantity: 1,
+        price: tax,
+        amount: tax,
+        hs_sku: 'SHOPIFY-GST',
+        description: `Shopify tax\nOrder: ${order.name}`
+      });
+      if (createdTax?.id) await associateObjects('line_items', createdTax.id, 'invoices', invoice.id);
+      createdLineSums.tax = money2(createdLineSums.tax + tax);
+    } catch (e) {
+      console.warn(`⚠️ Failed to create/associate GST line item for invoice ${invoice.id}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  // Final sanity: ensure sum of created line item amounts equals Shopify total; add rounding adjustment if needed
+  const createdTotal = money2(createdLineSums.products + createdLineSums.shipping + createdLineSums.adjustment + createdLineSums.tax);
+  const roundingDelta = money2(totalInc - createdTotal);
+  if (Math.abs(roundingDelta) >= 0.01) {
+    try {
+      const createdRound = await hubspotClient.createLineItem({
+        name: 'Rounding Adjustment',
+        quantity: 1,
+        price: roundingDelta,
+        amount: roundingDelta,
+        hs_sku: 'SHOPIFY-ROUNDING',
+        description: `Final rounding to match Shopify total\nOrder: ${order.name}\nDelta: ${roundingDelta}`
+      });
+      if (createdRound?.id) await associateObjects('line_items', createdRound.id, 'invoices', invoice.id);
+      console.log(`🧮 Added rounding adjustment ${roundingDelta} to match Shopify total`);
+    } catch (e) {
+      console.warn(`⚠️ Failed to create rounding adjustment for invoice ${invoice.id}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  // Persist hubspot_invoice_id back onto Shopify order
+  try {
+    const updatedNotes = existingNotes.some(na => String(na.name).toLowerCase() === 'hubspot_invoice_id')
+      ? existingNotes.map(na => (String(na.name).toLowerCase() === 'hubspot_invoice_id' ? { name: 'hubspot_invoice_id', value: String(invoice.id) } : na))
+      : existingNotes.concat([{ name: 'hubspot_invoice_id', value: String(invoice.id) }]);
+    await restClient.put(`/orders/${numericOrderId}.json`, { order: { id: numericOrderId, note_attributes: updatedNotes }});
+    console.log(`✅ Annotated Shopify order ${order.name} with HubSpot invoice ID ${invoice.id}`);
+  } catch (e) {
+    console.warn(`⚠️ Could not annotate Shopify order ${order.name} with HubSpot invoice ID:`, e.response?.data || e.message);
+  }
+
+  return invoice;
+}
+
 /**
  * Creates a Shopify order from HubSpot deal data
  */
@@ -2657,7 +2986,7 @@ if (HUBSPOT_PRIVATE_APP_TOKEN) {
 // Idempotency helpers to prevent duplicate order loops
 // ==================================================
 const processedHubspotDeals = new Map(); // dealId -> timestamp
-const processedShopifyOrders = new Map(); // orderId -> timestamp
+const processedShopifyOrders = new Map(); // `${orderId}:${scope}` -> timestamp
 const processedShopifyCustomers = new Map(); // customerId -> timestamp
 const processedHubspotContacts = new Map(); // contactId -> timestamp
 
@@ -2705,18 +3034,19 @@ const markDealProcessed = (dealId) => {
   } catch (_) {}
 };
 
-const wasOrderRecentlyProcessed = (orderId, ttlMs = 10 * 60 * 1000) => {
+const orderProcessKey = (orderId, scope = 'default') => `${String(orderId)}:${String(scope || 'default')}`;
+const wasOrderRecentlyProcessed = (orderId, scope = 'default', ttlMs = 10 * 60 * 1000) => {
   try {
-    const ts = processedShopifyOrders.get(String(orderId));
+    const ts = processedShopifyOrders.get(orderProcessKey(orderId, scope));
     return !!ts && (Date.now() - ts) < ttlMs;
   } catch (_) {
     return false;
   }
 };
 
-const markOrderProcessed = (orderId) => {
+const markOrderProcessed = (orderId, scope = 'default') => {
   try {
-    processedShopifyOrders.set(String(orderId), Date.now());
+    processedShopifyOrders.set(orderProcessKey(orderId, scope), Date.now());
   } catch (_) {}
 };
 
@@ -5088,14 +5418,15 @@ app.get('/api/google-ads/summary', ensureGoogle, async (req, res) => {
   }
 });
 /**
- * Shopify webhook endpoint for order creation
- * Creates a deal in HubSpot when a new order is placed
+ * Shopify webhook endpoint for order events
+ * - orders/create: creates a HubSpot deal
+ * - orders/paid: ensures deal exists, then creates a PAID HubSpot invoice matching Shopify totals
  */
 app.post("/shopify-webhook", async (req, res) => {
   const startTime = Date.now();
   
   try {
-    console.log("🛒 Shopify webhook received - Order created");
+    console.log("🛒 Shopify webhook received - Order event");
     if (LOG_VERBOSE) {
       console.log("🔍 Headers:", {
         'x-shopify-topic': req.headers['x-shopify-topic'],
@@ -5107,10 +5438,11 @@ app.post("/shopify-webhook", async (req, res) => {
     }
     if (LOG_VERBOSE) console.log("🔍 Raw body type:", typeof req.body);
     
-    // Verify this is an order creation webhook
+    // Verify this is a supported order webhook
     const webhookTopic = req.headers['x-shopify-topic'];
-    if (webhookTopic !== 'orders/create') {
-      console.log(`⚠️ Unexpected webhook topic: ${webhookTopic}, expected: orders/create`);
+    const supportedTopics = new Set(['orders/create', 'orders/paid']);
+    if (!supportedTopics.has(webhookTopic)) {
+      console.log(`⚠️ Unexpected webhook topic: ${webhookTopic}, expected one of: ${Array.from(supportedTopics).join(', ')}`);
       return res.status(200).json({ received: true, processed: false, message: `Ignoring webhook topic: ${webhookTopic}` });
     }
     
@@ -5145,9 +5477,9 @@ app.post("/shopify-webhook", async (req, res) => {
       return res.status(200).json({ received: true, processed: false, message: 'In-flight duplicate skipped' });
     }
 
-    // Order-level idempotency: skip if we've just processed this order ID very recently
-    if (wasOrderRecentlyProcessed(order.id)) {
-      console.log(`🛑 Skipping HubSpot deal creation for order ${order.name}: recently processed`);
+    // Topic-specific idempotency: skip if we've just processed this order+topic very recently
+    if (wasOrderRecentlyProcessed(order.id, webhookTopic)) {
+      console.log(`🛑 Skipping HubSpot processing for order ${order.name}: recently processed for topic ${webhookTopic}`);
       releaseOrderLock(order.id);
       return res.status(200).json({ received: true, processed: false, message: 'Duplicate order webhook skipped' });
     }
@@ -5193,28 +5525,35 @@ app.post("/shopify-webhook", async (req, res) => {
         orderNumber: order.name,
         tags: tagsValue
       });
-      markOrderProcessed(order.id);
+      markOrderProcessed(order.id, webhookTopic);
       releaseOrderLock(order.id);
       return res.status(200).json({ received: true, processed: false, message: 'Skipped split child order' });
     }
 
-    // Extra guard: if a HubSpot deal already exists for this Shopify order, skip creating another
-    try {
-      const existingDeals = await hubspotClient.searchDealsByShopifyOrder(order.id, order.name);
-      if (Array.isArray(existingDeals) && existingDeals.length > 0) {
-        console.log(`🛑 Existing HubSpot deal(s) found for order ${order.name}. Skipping creation.`);
-        markOrderProcessed(order.id);
-        releaseOrderLock(order.id);
-        return res.status(200).json({ received: true, processed: false, message: 'Existing deal found, skipped', orderId: order.id });
+    // For orders/create: if a deal already exists, skip creating another.
+    // For orders/paid: DO NOT skip; we still need to create the invoice even if the deal already exists.
+    if (webhookTopic === 'orders/create') {
+      try {
+        const existingDeals = await hubspotClient.searchDealsByShopifyOrder(order.id, order.name);
+        if (Array.isArray(existingDeals) && existingDeals.length > 0) {
+          console.log(`🛑 Existing HubSpot deal(s) found for order ${order.name}. Skipping deal creation.`);
+          markOrderProcessed(order.id, webhookTopic);
+          releaseOrderLock(order.id);
+          return res.status(200).json({ received: true, processed: false, message: 'Existing deal found, skipped', orderId: order.id });
+        }
+      } catch (searchErr) {
+        console.warn(`⚠️ Failed to search existing HubSpot deals for order ${order.name}:`, searchErr.message);
       }
-    } catch (searchErr) {
-      console.warn(`⚠️ Failed to search existing HubSpot deals for order ${order.name}:`, searchErr.message);
     }
 
-    // Create HubSpot deal from Shopify order
+    // Ensure a deal exists (upsert by shopify_order_id), then create invoice on orders/paid
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
+    if (webhookTopic === 'orders/paid') {
+      await createPaidHubSpotInvoiceFromShopifyOrder(order, createdDeal);
+    }
+
     // Mark order processed to prevent rapid duplicate processing
-    markOrderProcessed(order.id);
+    markOrderProcessed(order.id, webhookTopic);
     releaseOrderLock(order.id);
 
     const processingTime = Date.now() - startTime;
@@ -5223,7 +5562,9 @@ app.post("/shopify-webhook", async (req, res) => {
     res.status(200).json({ 
       received: true, 
       processed: true, 
-      message: "Deal created in HubSpot successfully",
+      message: webhookTopic === 'orders/paid'
+        ? "Deal ensured + paid invoice created in HubSpot successfully"
+        : "Deal created in HubSpot successfully",
       orderId: order.id,
       orderNumber: order.name,
       hubspotDealId: createdDeal?.id || null,
