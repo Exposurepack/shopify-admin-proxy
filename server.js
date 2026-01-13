@@ -1400,6 +1400,118 @@ const validateOrderGID = (orderGID) => {
 };
 
 /**
+ * Bot Blocker Support: Helper functions for Shopify Flow bot-suspected tag
+ * 
+ * These functions support (not replace) Shopify Flow bot blocker:
+ * - Flow tags customers as "bot-suspected"
+ * - Flow waits ~75 minutes, then deletes if: 0 orders, no phone, no address, no verified tag
+ * - This backend prevents bot-suspected customers from syncing to HubSpot
+ */
+
+/**
+ * Checks if a customer has the bot-suspected tag
+ * @param {Object} customer - Shopify customer object (may have tags string or array)
+ * @returns {boolean} - True if customer has bot-suspected tag
+ */
+function hasBotSuspectedTag(customer) {
+  if (!customer) return false;
+  
+  // Handle tags as string (comma-separated) or array
+  const tagsValue = Array.isArray(customer.tags) 
+    ? customer.tags.join(',') 
+    : (customer.tags || '');
+  
+  const tagsLower = String(tagsValue).toLowerCase();
+  return tagsLower.includes('bot-suspected');
+}
+
+/**
+ * Determines if a customer should be synced to HubSpot
+ * Self-healing logic: allows sync if customer has placed an order or lost the tag
+ * 
+ * @param {Object} customer - Shopify customer object
+ * @param {Object} order - Optional Shopify order object (if syncing from order webhook)
+ * @returns {Object} - { shouldSync: boolean, reason: string }
+ */
+function shouldSyncCustomerToHubSpot(customer, order = null) {
+  // If no customer data, allow sync (edge case - shouldn't happen)
+  if (!customer || !customer.id) {
+    return { shouldSync: true, reason: 'no_customer_data' };
+  }
+
+  // Check for bot-suspected tag
+  const isBotSuspected = hasBotSuspectedTag(customer);
+  
+  if (!isBotSuspected) {
+    return { shouldSync: true, reason: 'no_bot_tag' };
+  }
+
+  // Self-healing: If customer has placed an order, allow sync
+  // This handles the case where Shopify Flow hasn't deleted the customer yet
+  // but they've proven legitimacy by placing an order
+  if (order && order.id) {
+    return { 
+      shouldSync: true, 
+      reason: 'self_healing_order_placed',
+      note: 'Customer has bot-suspected tag but placed an order - allowing sync'
+    };
+  }
+
+  // Check if customer has orders (via customer.orders_count if available)
+  // Note: Shopify customer webhook may not include orders_count, but order webhook will have order data
+  if (customer.orders_count && parseInt(customer.orders_count) > 0) {
+    return { 
+      shouldSync: true, 
+      reason: 'self_healing_has_orders',
+      note: 'Customer has bot-suspected tag but has existing orders - allowing sync'
+    };
+  }
+
+  // Block sync: customer has bot-suspected tag and no orders
+  return { 
+    shouldSync: false, 
+    reason: 'bot_suspected_no_orders',
+    note: 'Customer has bot-suspected tag and no orders - blocking HubSpot sync'
+  };
+}
+
+/**
+ * Logs bot blocker activity for observability
+ * Non-blocking, production-safe logging
+ * 
+ * @param {string} action - Action being blocked/allowed ('blocked' | 'allowed')
+ * @param {Object} context - Context object with customer/order info
+ * @param {string} reason - Reason for the decision
+ */
+function logBotBlockerActivity(action, context, reason) {
+  const timestamp = new Date().toISOString();
+  const customerId = context.customer?.id || context.order?.customer?.id || 'unknown';
+  const customerEmail = context.customer?.email || context.order?.customer?.email || context.order?.email || 'unknown';
+  const orderId = context.order?.id || null;
+  const orderNumber = context.order?.name || null;
+  const tags = context.customer?.tags || context.order?.customer?.tags || 'none';
+  
+  const logData = {
+    timestamp,
+    action,
+    reason,
+    customer: {
+      id: customerId,
+      email: customerEmail,
+      tags: String(tags)
+    },
+    order: orderId ? { id: orderId, number: orderNumber } : null
+  };
+
+  // Use console.log for production-safe logging (can be captured by logging services)
+  if (action === 'blocked') {
+    console.log(`🚫 [BOT-BLOCKER] HubSpot sync blocked:`, JSON.stringify(logData));
+  } else {
+    console.log(`✅ [BOT-BLOCKER] HubSpot sync allowed:`, JSON.stringify(logData));
+  }
+}
+
+/**
  * Creates a HubSpot deal from Shopify order data
  */
 async function createHubSpotDealFromShopifyOrder(order) {
@@ -1413,6 +1525,20 @@ async function createHubSpotDealFromShopifyOrder(order) {
   try {
     // Extract customer information
     const customer = order.customer || {};
+    
+    // Bot blocker guard: Check if customer should be synced to HubSpot
+    const syncDecision = shouldSyncCustomerToHubSpot(customer, order);
+    if (!syncDecision.shouldSync) {
+      logBotBlockerActivity('blocked', { customer, order }, syncDecision.reason);
+      // Return early - do not create HubSpot contact or deal
+      // This is intentional: we silently ignore bot-suspected customers
+      return null;
+    }
+    
+    // Log if sync is allowed despite bot tag (self-healing)
+    if (syncDecision.note) {
+      logBotBlockerActivity('allowed', { customer, order }, syncDecision.reason);
+    }
     const billingAddress = order.billing_address || {};
     const shippingAddress = order.shipping_address || {};
 
@@ -5548,6 +5674,20 @@ app.post("/shopify-webhook", async (req, res) => {
 
     // Ensure a deal exists (upsert by shopify_order_id), then create invoice on orders/paid
     const createdDeal = await createHubSpotDealFromShopifyOrder(order);
+    
+    // If deal creation was blocked (e.g., bot-suspected customer), skip invoice creation too
+    if (!createdDeal) {
+      markOrderProcessed(order.id, webhookTopic);
+      releaseOrderLock(order.id);
+      return res.status(200).json({ 
+        received: true, 
+        processed: false, 
+        message: 'Deal creation blocked - skipping HubSpot sync',
+        orderId: order.id,
+        orderNumber: order.name
+      });
+    }
+    
     if (webhookTopic === 'orders/paid') {
       await createPaidHubSpotInvoiceFromShopifyOrder(order, createdDeal);
     }
@@ -5613,6 +5753,25 @@ app.post("/shopify-customer-webhook", async (req, res) => {
     // Idempotency on customer events
     if (wasCustomerRecentlyProcessed(customer.id)) {
       return res.status(200).json({ received: true, processed: false, message: 'Duplicate customer webhook skipped' });
+    }
+
+    // Bot blocker guard: Check if customer should be synced to HubSpot
+    const syncDecision = shouldSyncCustomerToHubSpot(customer);
+    if (!syncDecision.shouldSync) {
+      logBotBlockerActivity('blocked', { customer }, syncDecision.reason);
+      // Mark as processed to prevent retries, but do not sync to HubSpot
+      markCustomerProcessed(customer.id);
+      return res.status(200).json({ 
+        received: true, 
+        processed: false, 
+        message: 'Customer sync blocked: bot-suspected',
+        reason: syncDecision.reason
+      });
+    }
+    
+    // Log if sync is allowed despite bot tag (self-healing)
+    if (syncDecision.note) {
+      logBotBlockerActivity('allowed', { customer }, syncDecision.reason);
     }
 
     // Map Shopify customer → HubSpot contact properties
