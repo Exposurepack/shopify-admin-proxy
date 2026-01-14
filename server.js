@@ -7463,13 +7463,25 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
  */
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
   try {
+    // Debug logging
+    console.log(`🤖 AI Daily Agenda request received`);
+    console.log(`   OPENAI_API_KEY present: ${!!OPENAI_API_KEY}`);
+    console.log(`   OPENAI_API_KEY length: ${OPENAI_API_KEY ? OPENAI_API_KEY.length : 0}`);
+    console.log(`   OPENAI_API_KEY starts with: ${OPENAI_API_KEY ? OPENAI_API_KEY.substring(0, 7) : 'N/A'}...`);
+    
     const openai = await getOpenAIClient();
     if (!openai) {
+      const errorMsg = OPENAI_API_KEY 
+        ? "OpenAI package not installed. Please run: npm install openai"
+        : "OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in environment variables.";
+      console.log(`❌ AI service unavailable: ${errorMsg}`);
       return res.status(503).json({
         error: "AI service unavailable",
-        message: OPENAI_API_KEY 
-          ? "OpenAI package not installed. Please run: npm install openai"
-          : "OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in environment variables."
+        message: errorMsg,
+        debug: {
+          hasApiKey: !!OPENAI_API_KEY,
+          apiKeyLength: OPENAI_API_KEY ? OPENAI_API_KEY.length : 0
+        }
       });
     }
 
