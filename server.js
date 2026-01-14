@@ -7468,6 +7468,164 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
  * AI-Powered Daily Agenda Endpoint
  * Analyzes orders and predicts optimal daily tasks with AI
  */
+// Helper functions for risk and SLA calculation
+function calculateDaysInStage(order, stage) {
+  const now = new Date();
+  let stageStartDate = null;
+  
+  switch (stage) {
+    case 'Design & Artworks':
+      stageStartDate = order.metafields?.design_artworks_date_time ? new Date(order.metafields.design_artworks_date_time) : null;
+      break;
+    case 'In Production':
+      stageStartDate = order.metafields?.in_production_date_time ? new Date(order.metafields.in_production_date_time) : null;
+      break;
+    case 'Dispatched':
+      stageStartDate = order.metafields?.ready_for_dispatch_date_time ? new Date(order.metafields.ready_for_dispatch_date_time) : null;
+      break;
+    case 'Paid':
+      stageStartDate = order.createdAt ? new Date(order.createdAt) : null;
+      break;
+  }
+  
+  if (!stageStartDate || isNaN(stageStartDate.getTime())) return 0;
+  const diffMs = now - stageStartDate;
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+function calculateStageSLA(stage, daysInStage) {
+  // Stage-specific SLA thresholds (in days)
+  const slaThresholds = {
+    'Paid': 1, // Should move to Design within 1 business day
+    'Design & Artworks': 3, // Normal approval is 2-3 days, flag if >3
+    'In Production': 10, // Standard production is 10 business days
+    'Dispatched': 1 // Should be delivered tracking within 1 day of dispatch
+  };
+  
+  const threshold = slaThresholds[stage] || 999;
+  return {
+    threshold,
+    daysInStage,
+    isBreached: daysInStage > threshold,
+    daysOverdue: Math.max(0, daysInStage - threshold)
+  };
+}
+
+function calculateDeadlineProximity(expectedEndDate, productionStartDate) {
+  if (!expectedEndDate) return null;
+  
+  const now = new Date();
+  const deadline = new Date(expectedEndDate);
+  const diffMs = deadline - now;
+  const daysUntilDeadline = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  
+  // Calculate production days used if in production
+  let productionDaysUsed = 0;
+  if (productionStartDate) {
+    const prodStart = new Date(productionStartDate);
+    productionDaysUsed = Math.floor((now - prodStart) / (1000 * 60 * 60 * 24));
+  }
+  
+  return {
+    daysUntilDeadline,
+    isUrgent: daysUntilDeadline <= 3, // Urgent if deadline within 3 days
+    isCritical: daysUntilDeadline <= 1, // Critical if deadline tomorrow or today
+    productionDaysUsed
+  };
+}
+
+function calculateRiskFlags(order, stage, daysInStage, sla, deadline) {
+  const flags = [];
+  let riskScore = 0;
+  
+  // SLA breach risk
+  if (sla.isBreached) {
+    flags.push({
+      type: 'sla_breach',
+      severity: sla.daysOverdue > 2 ? 'high' : 'medium',
+      message: `Exceeded ${stage} SLA by ${sla.daysOverdue} days`
+    });
+    riskScore += sla.daysOverdue > 2 ? 40 : 20;
+  }
+  
+  // Deadline proximity risk
+  if (deadline) {
+    if (deadline.isCritical) {
+      flags.push({
+        type: 'deadline_critical',
+        severity: 'high',
+        message: `Deadline is ${deadline.daysUntilDeadline === 0 ? 'today' : 'tomorrow'}`
+      });
+      riskScore += 50;
+    } else if (deadline.isUrgent) {
+      flags.push({
+        type: 'deadline_urgent',
+        severity: 'medium',
+        message: `Deadline in ${deadline.daysUntilDeadline} days`
+      });
+      riskScore += 30;
+    }
+  }
+  
+  // Blocking risk (Design blocking Production)
+  if (stage === 'Design & Artworks' && daysInStage > 2) {
+    flags.push({
+      type: 'blocking_production',
+      severity: 'high',
+      message: 'Blocking production start - approval needed'
+    });
+    riskScore += 25;
+  }
+  
+  // High value risk
+  const orderValue = parseFloat(order.total_price || 0);
+  if (orderValue > 500) {
+    flags.push({
+      type: 'high_value',
+      severity: 'medium',
+      message: `High-value order ($${orderValue.toFixed(0)})`
+    });
+    riskScore += 15;
+  }
+  
+  // Missing dependency risk
+  if (stage === 'Paid' && daysInStage > 1) {
+    flags.push({
+      type: 'missing_artwork',
+      severity: 'medium',
+      message: 'No artwork uploaded - needs customer follow-up'
+    });
+    riskScore += 20;
+  }
+  
+  // Missing information risk
+  if (!order.customerEmail && stage !== 'Delivered') {
+    flags.push({
+      type: 'missing_contact',
+      severity: 'low',
+      message: 'Missing customer email - may delay communication'
+    });
+    riskScore += 5;
+  }
+  
+  return { flags, riskScore };
+}
+
+function shouldGenerateInsight(order, stage, daysInStage, sla, deadline, riskFlags) {
+  // Only generate insight if at least one risk condition is met
+  if (riskFlags.riskScore === 0) return false;
+  
+  // Don't generate insight for orders <24h in stage unless:
+  // - Deadline pressure exists
+  // - SLA already breached
+  // - High risk score (>30)
+  if (daysInStage < 1) {
+    return deadline?.isUrgent || sla.isBreached || riskFlags.riskScore > 30;
+  }
+  
+  return true;
+}
+
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
   try {
     // Debug logging
@@ -7657,6 +7815,16 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       const agentName = o.metafields?.agent_name || '';
       const businessName = o.note_attributes?.business_name || o.shipping_address?.company || o.customer?.displayName || o.name;
       
+      // Calculate risk metrics
+      const daysInStage = calculateDaysInStage(o, stage);
+      const sla = calculateStageSLA(stage, daysInStage);
+      const deadline = calculateDeadlineProximity(
+        o.metafields?.rushed_production_timeframe || null,
+        o.metafields?.in_production_date_time
+      );
+      const riskFlags = calculateRiskFlags(o, stage, daysInStage, sla, deadline);
+      const shouldInsight = shouldGenerateInsight(o, stage, daysInStage, sla, deadline, riskFlags);
+      
       return {
         id: o.id,
         name: o.name,
@@ -7664,6 +7832,7 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
         agent: agentName.toLowerCase().includes('tom') ? 'tom' : agentName.toLowerCase().includes('stefan') ? 'stefan' : 'unassigned',
         businessName,
         customerEmail: o.customer?.email,
+        customerPhone: o.customer?.phone || null,
         totalPrice: parseFloat(o.total_price || 0),
         createdAt: o.createdAt,
         inProductionDate: o.metafields?.in_production_date_time,
@@ -7672,7 +7841,17 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
         deliveredDate: o.metafields?.delivered_date_time,
         reviewRequestSent: o.metafields?.review_request_sent === 'true',
         tags: Array.isArray(o.tags) ? o.tags : [],
-        note: o.note || ''
+        note: o.note || '',
+        // Risk metrics
+        daysInStage,
+        slaBreach: sla.isBreached,
+        slaDaysOverdue: sla.daysOverdue,
+        deadlineUrgent: deadline?.isUrgent || false,
+        deadlineCritical: deadline?.isCritical || false,
+        deadlineDaysRemaining: deadline?.daysUntilDeadline || null,
+        riskFlags: riskFlags.flags,
+        riskScore: riskFlags.riskScore,
+        shouldGenerateInsight
       };
     });
 
@@ -7692,23 +7871,60 @@ Order stages:
 - "Dispatched": Shipped, tracking in progress
 - "Delivered": Completed delivery
 
+Stage SLAs (Standard Timelines):
+- Paid → Design: 1 business day (should move to Design within 1 day)
+- Design & Artworks: 3 days (normal approval is 2-3 days, flag if >3)
+- In Production: 10 business days (standard production timeline)
+- Dispatched: 1 day (should have tracking/delivery confirmation within 1 day)
+
 Orders data (${orderSummary.length} total):
 ${JSON.stringify(orderSummary, null, 2)}
 
-CRITICAL: Provide SPECIFIC, ACTIONABLE insights with exact order details. Do NOT give generic advice.
+CRITICAL INSIGHT GATING RULES:
+Generate an insight ONLY if at least one of these is true:
+1. Order is at risk of missing dispatch or delivery deadline
+2. Order is blocked by missing dependency (artwork approval, address, confirmation, payment issue)
+3. Order has exceeded stage SLA (check slaBreach, slaDaysOverdue fields)
+4. Order value ($500+) or customer importance makes delay costly
+5. Deadline is urgent (deadlineUrgent: true) or critical (deadlineCritical: true)
 
-Analyze these orders and predict the optimal daily agenda for ${todayStr}. For each task, provide:
-1. SPECIFIC order details (order name/number, business name, customer email)
-2. EXACT reason why this needs attention TODAY (not generic)
-3. DETAILED instructions on what action to take
-4. PRIORITY ranking based on: urgency, customer value, dependencies, potential delays
-5. SPECIFIC deadlines or timeframes when relevant
+DO NOT generate insights for:
+- Orders in stage <24 hours unless deadline pressure exists (deadlineUrgent: true)
+- Orders within normal timelines (daysInStage < SLA threshold)
+- Orders with shouldGenerateInsight: false
+- Routine workflow items ("paid today" is normal, not urgent)
+
+Maximum 3 insights total. If no orders meet criteria, return empty array: []
+
+INSIGHT FORMAT (each insight must be a structured object):
+{
+  "title": "Short, punchy title (max 60 chars)",
+  "whyItMatters": "Risk + consequence. Example: 'Exceeded Design SLA by 2 days - blocking production start, risking 10-day delivery promise'",
+  "nextAction": "Clear, specific steps. Example: '1. Call customer at [phone] immediately, 2. Request artwork approval or identify blockers, 3. If approved, move to production today, 4. Update timeline if delayed'",
+  "timebox": "Specific timeframe. Examples: 'Next 2 hours', 'Today by 5pm', 'Within 30 minutes', 'Next business day'",
+  "owner": "stefan|tom|both",
+  "missingInfo": "What's missing if applicable. Example: 'Customer phone number', 'Artwork files', 'Delivery address confirmation'",
+  "orderId": "Order ID for reference",
+  "orderName": "Order name/number",
+  "priority": "high|medium|low",
+  "priorityReason": "Why this is high priority: deadline proximity, stage blockage, customer impact, value signal. NOT 'because it was paid today'"
+}
 
 Return a JSON object with this structure:
 {
   "insights": [
-    "SPECIFIC insight with order numbers/names. Example: 'Order #1234 (Acme Coffee) has been in Design & Artworks for 5 days - needs artwork approval call today to avoid production delay'",
-    "Another specific insight with exact details..."
+    {
+      "title": "Design approval blocking production",
+      "whyItMatters": "Order #23161329 exceeded Design SLA by 2 days - blocking production start, risking delivery promise",
+      "nextAction": "Call customer immediately at [phone], request artwork approval or identify blockers, move to production today if approved",
+      "timebox": "Next 2 hours",
+      "owner": "stefan",
+      "missingInfo": "Customer phone number",
+      "orderId": "12345",
+      "orderName": "#23161329",
+      "priority": "high",
+      "priorityReason": "SLA breach blocking production start - each day delay pushes delivery back"
+    }
   ],
   "tasks": {
     "bookDelivery": [
@@ -7794,12 +8010,16 @@ Return a JSON object with this structure:
 }
 
 IMPORTANT RULES:
-- Be SPECIFIC: Always include order numbers, business names, customer details
-- Be ACTIONABLE: Provide step-by-step instructions, not generic advice
-- Be DETAILED: Include deadlines, timeframes, contact information when available
-- Rank by URGENCY: High priority = overdue, time-sensitive, high-value, VIP customers
+- INSIGHT GATING: Only generate insights for orders with shouldGenerateInsight: true OR riskScore > 30
+- SLA AWARENESS: Time-in-stage under 24h is NOT urgent unless deadlineUrgent: true or slaBreach: true
+- PRIORITY EXPLANATION: When marking high priority, explain using deadline proximity, stage blockage, customer impact, or value signal. NOT "because it was paid today"
+- STRUCTURED FORMAT: Each insight must include all fields: title, whyItMatters, nextAction, timebox, owner, missingInfo, priorityReason
+- MAX 3 INSIGHTS: Only the most critical insights. Quality over quantity.
+- NO GENERIC LANGUAGE: Avoid restating order status without consequences. Focus on risk and action.
 - Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}
-- Do NOT give generic insights like "monitor shipments" - say "Order #1234 shipped 3 days ago, check delivery status"`;
+- Use riskFlags array to understand what risks exist for each order
+- Use slaBreach and slaDaysOverdue to identify SLA violations
+- Use deadlineUrgent and deadlineCritical to identify deadline pressure`;
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
