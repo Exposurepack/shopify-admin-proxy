@@ -7656,6 +7656,32 @@ function enhanceTaskList(legacyTasks, aiEnhancements) {
   });
 }
 
+// Simple in-memory cache for AI enhancement results
+const aiEnhancementCache = new Map();
+const AI_ENHANCEMENT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function hashString(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function getEnhancementCache(key) {
+  const cached = aiEnhancementCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.timestamp > AI_ENHANCEMENT_CACHE_TTL_MS) {
+    aiEnhancementCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function setEnhancementCache(key, value) {
+  aiEnhancementCache.set(key, { value, timestamp: Date.now() });
+}
+
 // Build enhancement prompt (AI enhances pre-computed tasks)
 function buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agent, todayStr) {
   const totalTasks = (preComputedTasks.bookDelivery?.length || 0) +
@@ -7717,69 +7743,45 @@ CRITICAL RULES:
 - Every task must include evidence, what changed, what's blocking, exact actions with scripts
 - If data is missing (e.g. phone), call it out and propose best alternative channel
 
-Return JSON with this EXACT structure:
+Return JSON with this EXACT structure (no extra keys):
 {
   "date": "${todayStr}",
-  "report": {
-    "overview": "Long narrative summary of the day's workload, key themes, and overall status. No length limits.",
-    "patterns": "Long narrative about patterns you notice across tasks - common issues, trends, recurring problems. No length limits.",
-    "risks": "Long narrative about risks and potential problems if tasks aren't addressed. Be specific with consequences. No length limits."
-  },
+  "report": { "overview": "string", "patterns": "string", "risks": "string" },
   "ranked_tasks": [
     {
       "rank": 1,
-      "order_number": "23161317",
-      "order_id": "string or null",
-      "business_name": "string or null",
+      "order_number": "string",
+      "order_id": "string|null",
+      "business_name": "string|null",
       "stage": "Paid|Design & Artworks|In Production|Dispatched",
       "deadline_label": "production deadline|artwork deadline|dispatch deadline",
-      "deadline_status": {
-        "days_overdue": 0,
-        "due_in_days": 3
-      },
-      "urgency_score": 85,
-      "why_this_is_ranked_here": "Deep explanation: This is ranked #1 because it's 33 days overdue on production deadline, blocking customer delivery promise, and is high-value ($1,200). Compared to task #2 which is only 7 days overdue, this has higher impact.",
+      "deadline_status": { "days_overdue": number, "due_in_days": number|null },
+      "urgency_score": number,
+      "why_this_is_ranked_here": "string",
       "facts": {
-        "time_in_stage_days": 33,
-        "order_value": 1200,
-        "promised_date": "2026-01-15",
-        "latest_known_event": "Production started 2025-12-13",
-        "missing_fields": ["Customer phone number", "Supplier confirmation"]
+        "time_in_stage_days": number|null,
+        "order_value": number|null,
+        "promised_date": "string|null",
+        "latest_known_event": "string|null",
+        "missing_fields": ["string", "..."]
       },
-      "root_cause_hypothesis": "Production delay likely due to supplier capacity issues or missing artwork approval. Order has been in production for 33 days vs 10-day standard deadline.",
-      "impact_if_ignored": "Customer will miss delivery promise by 23+ days. High-value order risks cancellation. Reputation damage with repeat customer.",
+      "root_cause_hypothesis": "string",
+      "impact_if_ignored": "string",
       "next_actions": [
         {
-          "step": 1,
-          "action": "Call customer immediately",
-          "owner": "Stefan",
-          "channel": "call",
-          "target": "Customer name",
-          "script": "Hi [Name], this is Stefan from Exposure Pack. I'm calling about order #23161317. I wanted to update you that production is taking longer than expected - we're currently 23 days past our original deadline. I'm working with our supplier to expedite this, but I wanted to be transparent with you. Can we discuss a revised delivery timeline?",
-          "success_criteria": "Customer acknowledges delay and agrees to revised timeline"
-        },
-        {
-          "step": 2,
-          "action": "Contact supplier for status update",
-          "owner": "Stefan",
-          "channel": "internal",
-          "target": "Production supplier",
-          "script": "Hi, checking on order #23161317 - it's been 33 days in production, well past our 10-day deadline. What's the current status and when can we expect completion?",
-          "success_criteria": "Supplier provides completion date"
+          "step": number,
+          "action": "string",
+          "owner": "Stefan|Tom|Both",
+          "channel": "call|email|sms|internal",
+          "target": "string|null",
+          "script": "string",
+          "success_criteria": "string"
         }
       ],
-      "follow_up_plan": "If no response from customer within 24 hours, send email with timeline update. If supplier doesn't respond, escalate to production manager.",
-      "links": {
-        "shopify_admin_url": "https://admin.shopify.com/store/orders/[order_id]",
-        "hubspot_url": null
-      },
-      "customer_contact": {
-        "name": "Customer name",
-        "email": "customer@email.com",
-        "phone": null
-      }
+      "follow_up_plan": "string",
+      "links": { "shopify_admin_url": "string|null", "hubspot_url": "string|null" },
+      "customer_contact": { "name": "string|null", "email": "string|null", "phone": "string|null" }
     }
-    // ... continue for ALL ${totalTasks} tasks, rank 1..${totalTasks}
   ]
 }
 
@@ -7840,6 +7842,14 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
         ...(preComputedTasks.followUpPaid || []),
         ...(preComputedTasks.collectReviews || [])
       ];
+
+      // Check cache to avoid repeated AI calls for identical task sets
+      const cacheKey = `${targetDate.toISOString().split('T')[0]}|${agent}|${hashString(JSON.stringify(orderSummary))}`;
+      const cachedResponse = getEnhancementCache(cacheKey);
+      if (cachedResponse) {
+        console.log(`⚡ Using cached AI enhancement for ${cacheKey}`);
+        return res.json(cachedResponse);
+      }
       
       // Build AI prompt for enhancement mode
       const todayStr = targetDate.toISOString().split('T')[0];
@@ -7916,7 +7926,7 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       
       console.log(`✅ AI enhancement complete: ${actualTaskCount} ranked tasks, report sections: ${aiResponse.report ? Object.keys(aiResponse.report).length : 0}`);
       
-      return res.json({
+      const responsePayload = {
         success: true,
         date: aiResponse.date || todayStr,
         agent,
@@ -7924,7 +7934,12 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
         ranked_tasks: aiResponse.ranked_tasks || [],
         tasks: enhancedTasks, // Backwards compatibility
         timestamp: new Date().toISOString()
-      });
+      };
+
+      // Cache the full response payload
+      setEnhancementCache(cacheKey, responsePayload);
+
+      return res.json(responsePayload);
     }
     
     // Original compute mode (fallback for backwards compatibility)
