@@ -12,7 +12,6 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import fs from "fs";
 import HubSpotRateLimitedClient from "./lib/hubspotRateLimitedClient.js";
-import OpenAI from "openai";
 
 dotenv.config();
 
@@ -49,10 +48,33 @@ const {
 
 const LOG_VERBOSE = process.env.LOG_VERBOSE === 'true';
 
-// Initialize OpenAI client (optional - only if API key is provided)
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-if (!OPENAI_API_KEY) {
-  console.warn("⚠️ OPENAI_API_KEY not set - AI daily agenda features will be disabled");
+// OpenAI will be loaded dynamically when needed (lazy import)
+// This allows the server to start even if the package isn't installed
+let openaiClient = null;
+let openaiModule = null;
+
+async function getOpenAIClient() {
+  if (!OPENAI_API_KEY) {
+    return null;
+  }
+  
+  if (openaiClient) {
+    return openaiClient;
+  }
+  
+  try {
+    if (!openaiModule) {
+      openaiModule = await import("openai");
+    }
+    openaiClient = new openaiModule.default({ apiKey: OPENAI_API_KEY });
+    console.log("✅ OpenAI client initialized - AI daily agenda features enabled");
+    return openaiClient;
+  } catch (error) {
+    console.warn("⚠️ OpenAI package not installed - AI daily agenda features will be disabled");
+    console.warn("   Install with: npm install openai");
+    console.warn("   Error:", error.message);
+    return null;
+  }
 }
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
@@ -7441,10 +7463,13 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
  */
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
   try {
+    const openai = await getOpenAIClient();
     if (!openai) {
       return res.status(503).json({
         error: "AI service unavailable",
-        message: "OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in environment variables."
+        message: OPENAI_API_KEY 
+          ? "OpenAI package not installed. Please run: npm install openai"
+          : "OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in environment variables."
       });
     }
 
