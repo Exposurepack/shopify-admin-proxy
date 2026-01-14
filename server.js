@@ -7880,21 +7880,91 @@ Stage SLAs (Standard Timelines):
 Orders data (${orderSummary.length} total):
 ${JSON.stringify(orderSummary, null, 2)}
 
-CRITICAL INSIGHT GATING RULES:
-Generate an insight ONLY if at least one of these is true:
-1. Order is at risk of missing dispatch or delivery deadline
-2. Order is blocked by missing dependency (artwork approval, address, confirmation, payment issue)
-3. Order has exceeded stage SLA (check slaBreach, slaDaysOverdue fields)
-4. Order value ($500+) or customer importance makes delay costly
-5. Deadline is urgent (deadlineUrgent: true) or critical (deadlineCritical: true)
+CRITICAL INSIGHT GATING RULES - PRIORITIZE OVERDUE ORDERS:
+You MUST generate insights for orders that are OVERDUE or AT RISK. Look for these indicators:
 
-DO NOT generate insights for:
-- Orders in stage <24 hours unless deadline pressure exists (deadlineUrgent: true)
-- Orders within normal timelines (daysInStage < SLA threshold)
-- Orders with shouldGenerateInsight: false
-- Routine workflow items ("paid today" is normal, not urgent)
+1. SLA BREACH (HIGHEST PRIORITY): Order has slaBreach: true AND slaDaysOverdue > 0
+   → These are OVERDUE and MUST have insights generated
+   → Example: slaDaysOverdue: 7 means order is 7 days past SLA deadline
 
-Maximum 3 insights total. If no orders meet criteria, return empty array: []
+2. DEADLINE PRESSURE: deadlineCritical: true OR (deadlineUrgent: true AND deadlineDaysRemaining <= 3)
+   → Order will miss promised delivery date
+
+3. BLOCKING PRODUCTION: stage is "Design & Artworks" AND daysInStage > 3 AND riskScore > 30
+   → Artwork approval delay is blocking production start
+
+4. HIGH-VALUE OVERDUE: totalPrice > 500 AND (slaBreach OR deadlineUrgent)
+   → Expensive orders that are overdue need immediate attention
+
+5. MISSING DEPENDENCY: riskFlags contains blocking or missing dependency AND daysInStage > 1
+   → Critical information missing that prevents progress
+
+ABSOLUTELY DO NOT generate insights for:
+- Orders with shouldGenerateInsight: false (skip these entirely)
+- Orders in stage <24 hours UNLESS deadlineCritical: true
+- Orders within normal timelines (daysInStage < SLA threshold AND !deadlineUrgent)
+- Routine workflow items without consequence ("paid today", "in artworks for 14 hours")
+- Orders with riskScore < 30 AND no SLA breach
+
+EXAMPLES OF BAD INSIGHTS (DO NOT GENERATE - THESE ARE BORING):
+❌ "Order #1234 was paid today - requires immediate processing" 
+   → BAD: Normal workflow, no consequence stated
+   
+❌ "Order #1234 is in Design & Artworks stage"
+   → BAD: Just restating status, no risk or action
+   
+❌ "Order #1234 has been waiting 14 hours for approval"
+   → BAD: Too soon, not overdue, no consequence
+
+❌ "Order #1234 needs artwork approval"
+   → BAD: Generic, no consequence, no urgency
+
+EXAMPLES OF GOOD INSIGHTS (GENERATE THESE - THESE ARE ACTIONABLE):
+✅ {
+     "title": "Design approval 7 days overdue",
+     "whyItMatters": "Order #23161325 exceeded Design SLA by 7 days - blocking production start, risking 10-day delivery promise. Customer is repeat buyer.",
+     "nextAction": "1. Call customer at [phone] immediately, 2. Escalate if no response, 3. Move to production TODAY if approved, 4. Update delivery timeline",
+     "timebox": "Next 2 hours",
+     "owner": "stefan",
+     "priority": "high",
+     "priorityReason": "SLA breach blocking production - each day delay pushes delivery back 1 day"
+   }
+
+✅ {
+     "title": "Production deadline tomorrow",
+     "whyItMatters": "Order #23161317 deadline is tomorrow but production hasn't started - will miss delivery commitment, customer is VIP",
+     "nextAction": "1. Contact production team NOW, 2. Expedite if possible, 3. Contact customer to reset expectations if not",
+     "timebox": "Within 30 minutes",
+     "owner": "both",
+     "priority": "high",
+     "priorityReason": "Critical deadline tomorrow - production not started means guaranteed delay"
+   }
+
+✅ {
+     "title": "High-value order stuck 5 days",
+     "whyItMatters": "Order #23161220 ($1,200) stuck in Design for 5 days (2 days overdue) - high-value order, risk of customer cancellation",
+     "nextAction": "1. Call customer immediately, 2. Offer expedited production if approved today, 3. Escalate to manager if no response",
+     "timebox": "Today by 5pm",
+     "owner": "stefan",
+     "priority": "high",
+     "priorityReason": "High-value order + SLA breach = significant revenue risk"
+   }
+
+INSIGHT GENERATION LOGIC:
+1. FIRST: Scan all orders and identify those with slaBreach: true → These MUST get insights
+2. SECOND: Identify orders with deadlineCritical: true → These MUST get insights  
+3. THIRD: Identify orders with deadlineUrgent: true AND deadlineDaysRemaining <= 3 → Generate insights
+4. FOURTH: Identify blocking orders (Design > 3 days) → Generate insights
+5. RANK: Sort by slaDaysOverdue (highest first), then riskScore, then totalPrice
+6. SELECT: Top 3 most critical insights only
+
+Maximum 3 insights total. If you find MORE than 3 overdue orders, prioritize:
+- Highest slaDaysOverdue first
+- Then deadlineCritical orders
+- Then highest riskScore
+- Then highest totalPrice
+
+If NO orders meet criteria (no SLA breaches, no deadlines), return empty array: []
 
 INSIGHT FORMAT (each insight must be a structured object):
 {
@@ -8009,17 +8079,62 @@ Return a JSON object with this structure:
   ]
 }
 
-IMPORTANT RULES:
-- INSIGHT GATING: Only generate insights for orders with shouldGenerateInsight: true OR riskScore > 30
-- SLA AWARENESS: Time-in-stage under 24h is NOT urgent unless deadlineUrgent: true or slaBreach: true
-- PRIORITY EXPLANATION: When marking high priority, explain using deadline proximity, stage blockage, customer impact, or value signal. NOT "because it was paid today"
-- STRUCTURED FORMAT: Each insight must include all fields: title, whyItMatters, nextAction, timebox, owner, missingInfo, priorityReason
-- MAX 3 INSIGHTS: Only the most critical insights. Quality over quantity.
-- NO GENERIC LANGUAGE: Avoid restating order status without consequences. Focus on risk and action.
-- Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}
-- Use riskFlags array to understand what risks exist for each order
-- Use slaBreach and slaDaysOverdue to identify SLA violations
-- Use deadlineUrgent and deadlineCritical to identify deadline pressure`;
+CRITICAL RULES - FOLLOW STRICTLY:
+
+STEP 1 - FILTER ORDERS:
+- Skip orders where shouldGenerateInsight: false
+- Skip orders with riskScore < 30 UNLESS slaBreach: true (overdue orders always qualify)
+
+STEP 2 - IDENTIFY OVERDUE ORDERS (HIGHEST PRIORITY):
+- Find ALL orders with slaBreach: true → These are OVERDUE and MUST get insights
+- Count how many overdue orders exist
+- If you find overdue orders but don't generate insights, you're WRONG
+
+STEP 3 - GENERATE INSIGHTS FOR OVERDUE ORDERS:
+For each overdue order (slaBreach: true), create an insight with:
+- title: Must mention "overdue" or "SLA breach" or days overdue
+- whyItMatters: Must state consequence (blocking production, missing deadline, customer impact)
+- nextAction: Must be specific steps (call customer, escalate, move to production)
+- timebox: Must be urgent ("Next 2 hours", "Today by 5pm", "Within 30 minutes")
+- owner: Assign based on agent field or "both" if unassigned
+- priority: "high" for overdue orders
+- priorityReason: Must explain why overdue (SLA breach, blocking, deadline)
+
+STEP 4 - RANK AND SELECT:
+- Sort overdue orders by slaDaysOverdue (highest first)
+- Select top 3 most overdue
+- If fewer than 3 overdue, add deadlineCritical orders
+- If still fewer than 3, add deadlineUrgent orders
+
+STEP 5 - FORMAT REQUIREMENTS:
+Every insight MUST include ALL fields:
+- title (max 60 chars, mention "overdue" if applicable)
+- whyItMatters (must include consequence: "blocking", "risking", "will miss")
+- nextAction (numbered steps: "1. Call... 2. Escalate... 3. Move...")
+- timebox (specific: "Next 2 hours", not "soon")
+- owner ("stefan", "tom", or "both")
+- priority ("high" for overdue, "medium" for urgent, "low" for others)
+- priorityReason (explain why: "SLA breach", "deadline tomorrow", "blocking production")
+
+BANNED PHRASES (DO NOT USE):
+- "requires immediate processing" (too generic)
+- "needs attention" (too vague)
+- "awaiting approval" (just status, no consequence)
+- "paid today" (normal workflow)
+- "in artworks for X hours" (unless overdue)
+
+REQUIRED PHRASES (USE THESE):
+- "exceeded SLA by X days"
+- "blocking production"
+- "risking delivery promise"
+- "will miss deadline"
+- "overdue by X days"
+
+If you find overdue orders (slaBreach: true) but return empty insights array, you FAILED.
+If you generate insights without consequence statements, you FAILED.
+If you generate insights without specific actions, you FAILED.
+
+Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
@@ -8049,7 +8164,36 @@ IMPORTANT RULES:
 
     const aiResponse = JSON.parse(completion.choices[0].message.content);
     
-    console.log(`✅ AI analysis complete: ${aiResponse.tasks ? Object.keys(aiResponse.tasks).length : 0} task categories`);
+    // Transform structured insights to backward-compatible format
+    // Keep both formats: structured insights (new) and string array (legacy)
+    let insightsArray = [];
+    let structuredInsights = [];
+    
+    if (Array.isArray(aiResponse.insights)) {
+      // Check if insights are structured objects or strings
+      if (aiResponse.insights.length > 0 && typeof aiResponse.insights[0] === 'object' && aiResponse.insights[0].title) {
+        // Structured format - keep structured and create string version
+        structuredInsights = aiResponse.insights;
+        insightsArray = aiResponse.insights.map(insight => {
+          // Create a concise string version for backward compatibility
+          return `${insight.title}: ${insight.whyItMatters}. Action: ${insight.nextAction} (${insight.timebox})`;
+        });
+      } else {
+        // Already string format or invalid format
+        insightsArray = aiResponse.insights.filter(i => typeof i === 'string');
+        // Try to extract structured insights if they exist but weren't properly formatted
+        if (aiResponse.insightsStructured && Array.isArray(aiResponse.insightsStructured)) {
+          structuredInsights = aiResponse.insightsStructured;
+        }
+      }
+    }
+    
+    // Ensure insights array exists (even if empty)
+    aiResponse.insights = insightsArray;
+    // Always set structured insights (even if empty)
+    aiResponse.insightsStructured = structuredInsights;
+    
+    console.log(`✅ AI analysis complete: ${aiResponse.tasks ? Object.keys(aiResponse.tasks).length : 0} task categories, ${structuredInsights.length} structured insights, ${insightsArray.length} string insights`);
 
     res.json({
       success: true,
