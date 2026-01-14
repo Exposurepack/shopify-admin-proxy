@@ -7658,10 +7658,10 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
 
     // Fetch only relevant orders (not all orders - just current/active ones)
     // Filter for orders that are: Paid, Design & Artworks, In Production, or Dispatched
-    // Exclude Delivered and Pending Payment orders
+    // Exclude Delivered, Pending Payment, Cancelled, and Archived orders
     const ordersQuery = `
       query GetOrdersForAgenda($first: Int!) {
-        orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "status:open OR fulfillment_status:unfulfilled OR fulfillment_status:partial") {
+        orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "(status:open OR fulfillment_status:unfulfilled OR fulfillment_status:partial) AND -status:cancelled AND -status:archived") {
           edges {
             node {
               id
@@ -7669,6 +7669,7 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
               name
               createdAt
               updatedAt
+              cancelledAt
               tags
               note
               displayFinancialStatus
@@ -7725,52 +7726,65 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
     `;
 
     const data = await graphqlClient.query(ordersQuery, { first: 250 });
-    const orders = data.data.orders.edges.map(({ node }) => {
-      const metafields = {};
-      node.metafields.edges.forEach((mf) => {
-        metafields[mf.node.key] = mf.node.value;
-      });
+    const orders = data.data.orders.edges
+      .map(({ node }) => {
+        // Skip cancelled or archived orders
+        if (node.cancelledAt || node.tags?.includes('archived') || node.tags?.includes('deleted')) {
+          return null;
+        }
+        
+        const metafields = {};
+        node.metafields.edges.forEach((mf) => {
+          metafields[mf.node.key] = mf.node.value;
+        });
 
-      return {
-        id: node.legacyResourceId,
-        name: node.name,
-        createdAt: node.createdAt,
-        updatedAt: node.updatedAt,
-        tags: node.tags || [],
-        note: node.note || '',
-        financial_status: node.displayFinancialStatus,
-        fulfillment_status: node.displayFulfillmentStatus,
-        total_price: node.totalPriceSet?.shopMoney?.amount || '0',
-        currency: node.totalPriceSet?.shopMoney?.currencyCode || 'AUD',
-        customer: {
-          id: node.customer?.id,
-          displayName: node.customer?.displayName,
-          email: node.customer?.email,
-          phone: node.customer?.phone
-        },
-        shipping_address: node.shippingAddress,
-        line_items: node.lineItems.edges.map(e => ({
-          title: e.node.title,
-          quantity: e.node.quantity,
-          variantTitle: e.node.variantTitle,
-          product: {
-            title: e.node.product?.title,
-            productType: e.node.product?.productType
-          }
-        })),
-        metafields
-      };
-    });
+        return {
+          id: node.legacyResourceId,
+          name: node.name,
+          createdAt: node.createdAt,
+          updatedAt: node.updatedAt,
+          tags: node.tags || [],
+          note: node.note || '',
+          financial_status: node.displayFinancialStatus,
+          fulfillment_status: node.displayFulfillmentStatus,
+          total_price: node.totalPriceSet?.shopMoney?.amount || '0',
+          currency: node.totalPriceSet?.shopMoney?.currencyCode || 'AUD',
+          customer: {
+            id: node.customer?.id,
+            displayName: node.customer?.displayName,
+            email: node.customer?.email,
+            phone: node.customer?.phone
+          },
+          shipping_address: node.shippingAddress,
+          line_items: node.lineItems.edges.map(e => ({
+            title: e.node.title,
+            quantity: e.node.quantity,
+            variantTitle: e.node.variantTitle,
+            product: {
+              title: e.node.product?.title,
+              productType: e.node.product?.productType
+            }
+          })),
+          metafields
+        };
+      })
+      .filter(order => order !== null); // Remove any null entries (deleted/cancelled orders)
 
-    // Fetch note_attributes for business names
+    // Fetch note_attributes for business names (exclude cancelled/archived orders)
     let restOrdersMap = {};
     try {
-      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any&fields=id,note_attributes`);
+      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=open&fields=id,note_attributes,cancelled_at`);
       restOrdersRes.orders.forEach((order) => {
+        // Skip cancelled or archived orders
+        if (order.cancelled_at) {
+          return; // Skip cancelled orders
+        }
         const noteAttributes = {};
-        order.note_attributes.forEach((na) => {
-          noteAttributes[na.name] = na.value;
-        });
+        if (order.note_attributes && Array.isArray(order.note_attributes)) {
+          order.note_attributes.forEach((na) => {
+            noteAttributes[na.name] = na.value;
+          });
+        }
         restOrdersMap[order.id] = noteAttributes;
       });
     } catch (restError) {
