@@ -7695,41 +7695,111 @@ Order stages:
 Orders data (${orderSummary.length} total):
 ${JSON.stringify(orderSummary, null, 2)}
 
-Analyze these orders and predict the optimal daily agenda for ${todayStr}. Consider:
-1. Urgency: Orders overdue, VIP customers, high-value orders
-2. Dependencies: Orders that need artwork approval before production
-3. Workload balance: Distribute tasks between agents if agent='all'
-4. Optimal sequencing: Which tasks should be done first for maximum efficiency
-5. Proactive actions: Orders that need follow-up even if not explicitly due today
+CRITICAL: Provide SPECIFIC, ACTIONABLE insights with exact order details. Do NOT give generic advice.
+
+Analyze these orders and predict the optimal daily agenda for ${todayStr}. For each task, provide:
+1. SPECIFIC order details (order name/number, business name, customer email)
+2. EXACT reason why this needs attention TODAY (not generic)
+3. DETAILED instructions on what action to take
+4. PRIORITY ranking based on: urgency, customer value, dependencies, potential delays
+5. SPECIFIC deadlines or timeframes when relevant
 
 Return a JSON object with this structure:
 {
-  "insights": ["string array of key insights"],
+  "insights": [
+    "SPECIFIC insight with order numbers/names. Example: 'Order #1234 (Acme Coffee) has been in Design & Artworks for 5 days - needs artwork approval call today to avoid production delay'",
+    "Another specific insight with exact details..."
+  ],
   "tasks": {
     "bookDelivery": [
+      {
+        "orderId": "string (numeric ID)",
+        "orderName": "string (e.g. #1234)",
+        "businessName": "string",
+        "priority": "high|medium|low",
+        "reason": "SPECIFIC reason: 'Expected completion date is today', 'High-value order ($500+)', 'VIP customer', 'Overdue by 2 days', etc.",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED step-by-step: '1. Check production status with supplier, 2. Confirm ready for dispatch, 3. Book TNT shipment for tomorrow, 4. Send tracking to customer@email.com'",
+        "deadline": "Specific deadline if applicable (e.g. 'Must dispatch by Jan 15')",
+        "customerEmail": "email if available"
+      }
+    ],
+    "monitorShipments": [
       {
         "orderId": "string",
         "orderName": "string",
         "businessName": "string",
         "priority": "high|medium|low",
-        "reason": "why this needs attention today",
-        "urgencyScore": 0-100
+        "reason": "SPECIFIC: 'Shipped 3 days ago, expected delivery today', 'Customer requested urgent delivery', 'High-value order in transit'",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED: '1. Check carrier tracking status, 2. Verify delivery address, 3. Contact customer if delayed, 4. Update order status'",
+        "trackingInfo": "Tracking number or carrier if available",
+        "expectedDelivery": "Expected delivery date if known"
       }
     ],
-    "monitorShipments": [...],
-    "followUpDesign": [...],
-    "followUpPaid": [...],
-    "collectReviews": [...]
+    "followUpDesign": [
+      {
+        "orderId": "string",
+        "orderName": "string",
+        "businessName": "string",
+        "priority": "high|medium|low",
+        "reason": "SPECIFIC: 'Awaiting approval for 4 days', 'Customer requested changes', 'Artwork needs revision before production'",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED: '1. Call customer at [phone] or email [email], 2. Request artwork approval, 3. Explain production timeline depends on approval, 4. Follow up in 24h if no response'",
+        "daysWaiting": "Number of days waiting for approval",
+        "customerEmail": "email",
+        "customerPhone": "phone if available"
+      }
+    ],
+    "followUpPaid": [
+      {
+        "orderId": "string",
+        "orderName": "string",
+        "businessName": "string",
+        "priority": "high|medium|low",
+        "reason": "SPECIFIC: 'Paid 2 days ago, no artwork uploaded', 'High-value order needs immediate processing', 'Customer requested rush order'",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED: '1. Send welcome email with artwork upload instructions, 2. Schedule design consultation call, 3. Set production start date, 4. Confirm delivery timeline'",
+        "daysSincePaid": "Number of days since payment",
+        "customerEmail": "email"
+      }
+    ],
+    "collectReviews": [
+      {
+        "orderId": "string",
+        "orderName": "string",
+        "businessName": "string",
+        "priority": "high|medium|low",
+        "reason": "SPECIFIC: 'Delivered 3 days ago, no review requested yet', 'VIP customer - high value review', 'Repeat customer - likely to leave review'",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED: '1. Send personalized review request email to [email], 2. Mention specific order details, 3. Include Google review link, 4. Follow up if no response in 3 days'",
+        "daysSinceDelivered": "Number of days since delivery",
+        "customerEmail": "email",
+        "customerFirstName": "First name if available"
+      }
+    ]
   },
-  "recommendedOrder": ["array of task IDs in optimal execution order"],
+  "recommendedOrder": ["Array of order IDs in optimal execution order - most urgent first"],
   "workload": {
-    "stefan": { "taskCount": number, "estimatedHours": number },
-    "tom": { "taskCount": number, "estimatedHours": number }
+    "stefan": { "taskCount": number, "estimatedHours": number, "tasks": ["List of specific task descriptions"] },
+    "tom": { "taskCount": number, "estimatedHours": number, "tasks": ["List of specific task descriptions"] }
   },
-  "warnings": ["array of warnings about potential issues"]
+  "warnings": [
+    "SPECIFIC warnings with order details. Example: 'Order #5678 (Bella Cafe) is overdue for dispatch - production completed 2 days ago but not yet booked for shipping'",
+    "Another specific warning..."
+  ],
+  "topPriorities": [
+    "Top 3-5 most urgent tasks with specific order details and why they're urgent"
+  ]
 }
 
-Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}. Be practical and prioritize actionable tasks.`;
+IMPORTANT RULES:
+- Be SPECIFIC: Always include order numbers, business names, customer details
+- Be ACTIONABLE: Provide step-by-step instructions, not generic advice
+- Be DETAILED: Include deadlines, timeframes, contact information when available
+- Rank by URGENCY: High priority = overdue, time-sensitive, high-value, VIP customers
+- Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}
+- Do NOT give generic insights like "monitor shipments" - say "Order #1234 shipped 3 days ago, check delivery status"`;
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
