@@ -12,6 +12,7 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import fs from "fs";
 import HubSpotRateLimitedClient from "./lib/hubspotRateLimitedClient.js";
+import OpenAI from "openai";
 
 dotenv.config();
 
@@ -42,10 +43,17 @@ const {
   GA4_DEFAULT_PROPERTY_ID,
   ADS_DEVELOPER_TOKEN,
   ADS_LOGIN_CUSTOMER_ID,
-  ADS_DEFAULT_CUSTOMER_ID
+  ADS_DEFAULT_CUSTOMER_ID,
+  OPENAI_API_KEY
 } = process.env;
 
 const LOG_VERBOSE = process.env.LOG_VERBOSE === 'true';
+
+// Initialize OpenAI client (optional - only if API key is provided)
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY not set - AI daily agenda features will be disabled");
+}
 
 if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN || !FRONTEND_SECRET) {
   console.error("❌ Missing required environment variables:");
@@ -7424,6 +7432,271 @@ app.get('/wholesale-profit-export-csv', async (req, res) => {
       success: false,
       error: error.message
     });
+  }
+});
+
+/**
+ * AI-Powered Daily Agenda Endpoint
+ * Analyzes orders and predicts optimal daily tasks with AI
+ */
+app.post("/ai/daily-agenda", authenticate, async (req, res) => {
+  try {
+    if (!openai) {
+      return res.status(503).json({
+        error: "AI service unavailable",
+        message: "OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in environment variables."
+      });
+    }
+
+    const { date, agent = 'all' } = req.body;
+    const targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+
+    console.log(`🤖 AI Daily Agenda request: date=${date}, agent=${agent}`);
+
+    // Fetch all orders (we'll filter by agent in AI analysis)
+    const ordersQuery = `
+      query GetOrdersForAgenda($first: Int!) {
+        orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "status:any") {
+          edges {
+            node {
+              id
+              legacyResourceId
+              name
+              createdAt
+              updatedAt
+              tags
+              note
+              displayFinancialStatus
+              displayFulfillmentStatus
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              customer {
+                id
+                displayName
+                email
+                phone
+              }
+              shippingAddress {
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+              }
+              lineItems(first: 10) {
+                edges {
+                  node {
+                    title
+                    quantity
+                    variantTitle
+                    product {
+                      title
+                      productType
+                    }
+                  }
+                }
+              }
+              metafields(first: 30, namespace: "custom") {
+                edges {
+                  node {
+                    key
+                    value
+                    type
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const data = await graphqlClient.query(ordersQuery, { first: 250 });
+    const orders = data.data.orders.edges.map(({ node }) => {
+      const metafields = {};
+      node.metafields.edges.forEach((mf) => {
+        metafields[mf.node.key] = mf.node.value;
+      });
+
+      return {
+        id: node.legacyResourceId,
+        name: node.name,
+        createdAt: node.createdAt,
+        updatedAt: node.updatedAt,
+        tags: node.tags || [],
+        note: node.note || '',
+        financial_status: node.displayFinancialStatus,
+        fulfillment_status: node.displayFulfillmentStatus,
+        total_price: node.totalPriceSet?.shopMoney?.amount || '0',
+        currency: node.totalPriceSet?.shopMoney?.currencyCode || 'AUD',
+        customer: {
+          id: node.customer?.id,
+          displayName: node.customer?.displayName,
+          email: node.customer?.email,
+          phone: node.customer?.phone
+        },
+        shipping_address: node.shippingAddress,
+        line_items: node.lineItems.edges.map(e => ({
+          title: e.node.title,
+          quantity: e.node.quantity,
+          variantTitle: e.node.variantTitle,
+          product: {
+            title: e.node.product?.title,
+            productType: e.node.product?.productType
+          }
+        })),
+        metafields
+      };
+    });
+
+    // Fetch note_attributes for business names
+    let restOrdersMap = {};
+    try {
+      const restOrdersRes = await restClient.get(`/orders.json?limit=250&status=any&fields=id,note_attributes`);
+      restOrdersRes.orders.forEach((order) => {
+        const noteAttributes = {};
+        order.note_attributes.forEach((na) => {
+          noteAttributes[na.name] = na.value;
+        });
+        restOrdersMap[order.id] = noteAttributes;
+      });
+    } catch (restError) {
+      console.warn("⚠️ Could not fetch note_attributes:", restError.message);
+    }
+
+    // Enrich orders with note_attributes
+    orders.forEach(order => {
+      if (restOrdersMap[order.id]) {
+        order.note_attributes = restOrdersMap[order.id];
+      }
+    });
+
+    // Prepare order summary for AI
+    const orderSummary = orders.map(o => {
+      const stage = o.metafields?.ready_for_dispatch_date_time ? 'Dispatched' :
+                    o.metafields?.in_production_date_time ? 'In Production' :
+                    o.metafields?.design_artworks_date_time ? 'Design & Artworks' :
+                    o.financial_status === 'PAID' ? 'Paid' : 'Pending Payment';
+      
+      const agentName = o.metafields?.agent_name || '';
+      const businessName = o.note_attributes?.business_name || o.shipping_address?.company || o.customer?.displayName || o.name;
+      
+      return {
+        id: o.id,
+        name: o.name,
+        stage,
+        agent: agentName.toLowerCase().includes('tom') ? 'tom' : agentName.toLowerCase().includes('stefan') ? 'stefan' : 'unassigned',
+        businessName,
+        customerEmail: o.customer?.email,
+        totalPrice: parseFloat(o.total_price || 0),
+        createdAt: o.createdAt,
+        inProductionDate: o.metafields?.in_production_date_time,
+        expectedEndDate: o.metafields?.rushed_production_timeframe || null,
+        readyForDispatchDate: o.metafields?.ready_for_dispatch_date_time,
+        deliveredDate: o.metafields?.delivered_date_time,
+        reviewRequestSent: o.metafields?.review_request_sent === 'true',
+        tags: Array.isArray(o.tags) ? o.tags : [],
+        note: o.note || ''
+      };
+    });
+
+    // Build AI prompt
+    const todayStr = targetDate.toISOString().split('T')[0];
+    const prompt = `You are an expert operations manager analyzing order data to predict optimal daily tasks for ${todayStr}.
+
+Current date: ${new Date().toISOString()}
+Target date: ${targetDate.toISOString()}
+Agent filter: ${agent}
+
+Order stages:
+- "Pending Payment": Order not yet paid
+- "Paid": Payment received, awaiting next step
+- "Design & Artworks": Awaiting design/artwork approval
+- "In Production": Currently being manufactured
+- "Dispatched": Shipped, tracking in progress
+- "Delivered": Completed delivery
+
+Orders data (${orderSummary.length} total):
+${JSON.stringify(orderSummary.slice(0, 100), null, 2)}
+
+Analyze these orders and predict the optimal daily agenda for ${todayStr}. Consider:
+1. Urgency: Orders overdue, VIP customers, high-value orders
+2. Dependencies: Orders that need artwork approval before production
+3. Workload balance: Distribute tasks between agents if agent='all'
+4. Optimal sequencing: Which tasks should be done first for maximum efficiency
+5. Proactive actions: Orders that need follow-up even if not explicitly due today
+
+Return a JSON object with this structure:
+{
+  "insights": ["string array of key insights"],
+  "tasks": {
+    "bookDelivery": [
+      {
+        "orderId": "string",
+        "orderName": "string",
+        "businessName": "string",
+        "priority": "high|medium|low",
+        "reason": "why this needs attention today",
+        "urgencyScore": 0-100
+      }
+    ],
+    "monitorShipments": [...],
+    "followUpDesign": [...],
+    "followUpPaid": [...],
+    "collectReviews": [...]
+  },
+  "recommendedOrder": ["array of task IDs in optimal execution order"],
+  "workload": {
+    "stefan": { "taskCount": number, "estimatedHours": number },
+    "tom": { "taskCount": number, "estimatedHours": number }
+  },
+  "warnings": ["array of warnings about potential issues"]
+}
+
+Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}. Be practical and prioritize actionable tasks.`;
+
+    console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // Using mini for cost efficiency, can upgrade to gpt-4 if needed
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert operations manager. Analyze order data and return structured JSON with daily task predictions. Always return valid JSON."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.3 // Lower temperature for more consistent, focused results
+    });
+
+    const aiResponse = JSON.parse(completion.choices[0].message.content);
+    
+    console.log(`✅ AI analysis complete: ${aiResponse.tasks ? Object.keys(aiResponse.tasks).length : 0} task categories`);
+
+    res.json({
+      success: true,
+      date: todayStr,
+      agent,
+      ...aiResponse,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error("❌ AI Daily Agenda error:", error.message);
+    handleError(error, res, "AI daily agenda analysis failed");
   }
 });
 
