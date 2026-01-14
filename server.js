@@ -7498,10 +7498,12 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
 
     console.log(`🤖 AI Daily Agenda request: date=${date}, agent=${agent}`);
 
-    // Fetch all orders (we'll filter by agent in AI analysis)
+    // Fetch only relevant orders (not all orders - just current/active ones)
+    // Filter for orders that are: Paid, Design & Artworks, In Production, or Dispatched
+    // Exclude Delivered and Pending Payment orders
     const ordersQuery = `
       query GetOrdersForAgenda($first: Int!) {
-        orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "status:any") {
+        orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "status:open OR fulfillment_status:unfulfilled OR fulfillment_status:partial") {
           edges {
             node {
               id
@@ -7624,8 +7626,29 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       }
     });
 
-    // Prepare order summary for AI
-    const orderSummary = orders.map(o => {
+    // Filter to only current/relevant orders (not all orders)
+    // Only include orders that need action: Paid, Design & Artworks, In Production, Dispatched
+    // Exclude: Delivered, Pending Payment
+    const relevantOrders = orders.filter(o => {
+      const stage = o.metafields?.ready_for_dispatch_date_time ? 'Dispatched' :
+                    o.metafields?.in_production_date_time ? 'In Production' :
+                    o.metafields?.design_artworks_date_time ? 'Design & Artworks' :
+                    o.financial_status === 'PAID' ? 'Paid' : 'Pending Payment';
+      
+      // Only include orders that need action
+      return stage !== 'Delivered' && stage !== 'Pending Payment';
+    });
+    
+    // Limit to prevent timeout (but use relevant orders only)
+    const maxOrdersForAI = 50; // Reduced since we're filtering to relevant only
+    const ordersToProcess = relevantOrders.slice(0, maxOrdersForAI);
+    
+    console.log(`📊 Filtered to ${relevantOrders.length} relevant orders (out of ${orders.length} total)`);
+    if (relevantOrders.length > maxOrdersForAI) {
+      console.log(`⚠️ Limiting AI analysis to ${maxOrdersForAI} most relevant orders`);
+    }
+    
+    const orderSummary = ordersToProcess.map(o => {
       const stage = o.metafields?.ready_for_dispatch_date_time ? 'Dispatched' :
                     o.metafields?.in_production_date_time ? 'In Production' :
                     o.metafields?.design_artworks_date_time ? 'Design & Artworks' :
@@ -7670,7 +7693,7 @@ Order stages:
 - "Delivered": Completed delivery
 
 Orders data (${orderSummary.length} total):
-${JSON.stringify(orderSummary.slice(0, 100), null, 2)}
+${JSON.stringify(orderSummary, null, 2)}
 
 Analyze these orders and predict the optimal daily agenda for ${todayStr}. Consider:
 1. Urgency: Orders overdue, VIP customers, high-value orders
@@ -7710,7 +7733,12 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}. Be practical and 
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
-    const completion = await openai.chat.completions.create({
+    // Add timeout wrapper for OpenAI API call (45 seconds max)
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('OpenAI API request timed out after 45 seconds')), 45000);
+    });
+    
+    const aiCallPromise = openai.chat.completions.create({
       model: "gpt-4o-mini", // Using mini for cost efficiency, can upgrade to gpt-4 if needed
       messages: [
         {
@@ -7723,8 +7751,11 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}. Be practical and 
         }
       ],
       response_format: { type: "json_object" },
-      temperature: 0.3 // Lower temperature for more consistent, focused results
+      temperature: 0.3, // Lower temperature for more consistent, focused results
+      max_tokens: 4000 // Limit response size
     });
+    
+    const completion = await Promise.race([aiCallPromise, timeoutPromise]);
 
     const aiResponse = JSON.parse(completion.choices[0].message.content);
     
@@ -7740,6 +7771,17 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}. Be practical and 
 
   } catch (error) {
     console.error("❌ AI Daily Agenda error:", error.message);
+    console.error("   Error stack:", error.stack);
+    
+    // Return a helpful error response instead of generic 500
+    if (error.message.includes('timed out')) {
+      return res.status(504).json({
+        error: "AI request timeout",
+        message: "The AI analysis took too long. Try again or reduce the number of orders.",
+        timestamp: new Date().toISOString()
+      });
+    }
+    
     handleError(error, res, "AI daily agenda analysis failed");
   }
 });
