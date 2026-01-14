@@ -7626,6 +7626,130 @@ function shouldGenerateInsight(order, stage, daysInStage, sla, deadline, riskFla
   return true;
 }
 
+// Helper function to enhance task list with AI data
+function enhanceTaskList(legacyTasks, aiEnhancements) {
+  return legacyTasks.map(task => {
+    // Find matching AI enhancement by orderId
+    const enhancement = aiEnhancements.find(a => 
+      String(a.orderId) === String(task.orderId) || 
+      String(a.orderName) === String(task.orderName)
+    );
+    
+    if (enhancement) {
+      return {
+        ...task,
+        _aiPriority: enhancement.priority,
+        _aiReason: enhancement.reason,
+        _aiUrgencyScore: enhancement.urgencyScore,
+        _aiInstructions: enhancement.instructions,
+        _aiDeadline: enhancement.deadline,
+        _aiDaysWaiting: enhancement.daysWaiting,
+        _aiDaysSincePaid: enhancement.daysSincePaid,
+        _aiDaysSinceDelivered: enhancement.daysSinceDelivered,
+        _aiCustomerEmail: enhancement.customerEmail,
+        _aiCustomerPhone: enhancement.customerPhone,
+        _aiTrackingInfo: enhancement.trackingInfo,
+        _aiExpectedDelivery: enhancement.expectedDelivery
+      };
+    }
+    return task; // Return original if no enhancement found
+  });
+}
+
+// Build enhancement prompt (AI enhances pre-computed tasks)
+function buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agent, todayStr) {
+  return `You are an expert operations manager enhancing pre-computed daily tasks for ${todayStr}.
+
+IMPORTANT: These tasks have already been computed using proven business logic. Your job is to ENHANCE them, not replace them.
+
+Current date: ${new Date().toISOString()}
+Target date: ${targetDate.toISOString()}
+Agent filter: ${agent}
+
+Pre-computed tasks (from proven legacy logic):
+- Book delivery: ${preComputedTasks.bookDelivery?.length || 0} orders
+- Monitor shipments: ${preComputedTasks.monitorShipments?.length || 0} orders
+- Follow up Design: ${preComputedTasks.followUpDesign?.length || 0} orders
+- Follow up Paid: ${preComputedTasks.followUpPaid?.length || 0} orders
+- Collect reviews: ${preComputedTasks.collectReviews?.length || 0} orders
+
+Task details:
+${JSON.stringify(orderSummary, null, 2)}
+
+Stage SLAs (Standard Timelines):
+- Paid → Design: 1 business day
+- Design & Artworks: 3 days (normal approval is 2-3 days, flag if >3)
+- In Production: 10 business days
+- Dispatched: 1 day
+
+YOUR TASK: Enhance these pre-computed tasks with:
+1. Prioritization (high/medium/low) based on urgency, SLA breaches, deadlines
+2. Specific reasons why each task needs attention
+3. Step-by-step instructions for each task
+4. Urgency scores (0-100)
+5. Insights about critical issues (max 3)
+6. Warnings about potential problems
+7. Recommended execution order
+
+CRITICAL INSIGHT GATING RULES:
+Generate an insight ONLY if at least one is TRUE:
+1. Order has exceeded stage SLA (check daysInStage vs thresholds)
+2. Deadline is critical (expectedEndDate is today/tomorrow)
+3. Order is blocking production (Design > 3 days)
+4. High-value order ($500+) with risk factors
+
+DO NOT generate insights for:
+- Orders within normal timelines
+- Routine workflow items without consequence
+- Orders with daysInStage < SLA threshold
+
+Maximum 3 insights total. If no orders meet criteria, return empty array: []
+
+Return JSON with this structure:
+{
+  "insights": [
+    {
+      "title": "Short title (max 60 chars)",
+      "whyItMatters": "Risk + consequence",
+      "nextAction": "Specific steps",
+      "timebox": "Next 2 hours / Today by 5pm",
+      "owner": "stefan|tom|both",
+      "missingInfo": "What's missing if applicable",
+      "orderId": "Order ID",
+      "orderName": "Order name",
+      "priority": "high|medium|low",
+      "priorityReason": "Why this is high priority"
+    }
+  ],
+  "tasks": {
+    "bookDelivery": [
+      {
+        "orderId": "string",
+        "orderName": "string",
+        "priority": "high|medium|low",
+        "reason": "SPECIFIC reason with consequence",
+        "urgencyScore": 0-100,
+        "instructions": "DETAILED step-by-step",
+        "deadline": "Specific deadline if applicable"
+      }
+    ],
+    "monitorShipments": [...],
+    "followUpDesign": [...],
+    "followUpPaid": [...],
+    "collectReviews": [...]
+  },
+  "warnings": ["Specific warnings with order details"],
+  "topPriorities": ["Top 3-5 most urgent tasks"],
+  "recommendedOrder": ["Array of order IDs in optimal execution order"],
+  "workload": {
+    "stefan": { "taskCount": number, "estimatedHours": number },
+    "tom": { "taskCount": number, "estimatedHours": number }
+  }
+}
+
+Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
+}
+
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
   try {
     // Debug logging
@@ -7650,11 +7774,107 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       });
     }
 
-    const { date, agent = 'all' } = req.body;
+    const { date, agent = 'all', tasks: preComputedTasks, mode } = req.body;
     const targetDate = date ? new Date(date) : new Date();
     targetDate.setHours(0, 0, 0, 0);
+    const isEnhancementMode = mode === 'enhance' && preComputedTasks;
 
-    console.log(`🤖 AI Daily Agenda request: date=${date}, agent=${agent}`);
+    console.log(`🤖 AI Daily Agenda request: date=${date}, agent=${agent}, mode=${isEnhancementMode ? 'enhance' : 'compute'}`);
+    
+    // If tasks are pre-computed, use them directly (proven legacy logic)
+    if (isEnhancementMode) {
+      console.log(`✅ Using pre-computed tasks from legacy logic`);
+      console.log(`   Book delivery: ${preComputedTasks.bookDelivery?.length || 0}`);
+      console.log(`   Monitor shipments: ${preComputedTasks.monitorShipments?.length || 0}`);
+      console.log(`   Follow up design: ${preComputedTasks.followUpDesign?.length || 0}`);
+      console.log(`   Follow up paid: ${preComputedTasks.followUpPaid?.length || 0}`);
+      console.log(`   Collect reviews: ${preComputedTasks.collectReviews?.length || 0}`);
+      
+      // Use pre-computed tasks directly - AI will enhance them
+      const orderSummary = [
+        ...(preComputedTasks.bookDelivery || []),
+        ...(preComputedTasks.monitorShipments || []),
+        ...(preComputedTasks.followUpDesign || []),
+        ...(preComputedTasks.followUpPaid || []),
+        ...(preComputedTasks.collectReviews || [])
+      ];
+      
+      // Build AI prompt for enhancement mode
+      const todayStr = targetDate.toISOString().split('T')[0];
+      const prompt = buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agent, todayStr);
+      
+      // Call AI for enhancement
+      const completion = await Promise.race([
+        openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: "You are an expert operations manager. Enhance pre-computed daily tasks with prioritization, insights, and recommendations. Always return valid JSON."
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.3,
+          max_tokens: 4000
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 45 seconds')), 45000))
+      ]);
+      
+      const aiResponse = JSON.parse(completion.choices[0].message.content);
+      
+      // Transform structured insights
+      let insightsArray = [];
+      let structuredInsights = [];
+      
+      if (Array.isArray(aiResponse.insights)) {
+        if (aiResponse.insights.length > 0 && typeof aiResponse.insights[0] === 'object' && aiResponse.insights[0].title) {
+          structuredInsights = aiResponse.insights;
+          insightsArray = aiResponse.insights.map(insight => {
+            return `${insight.title}: ${insight.whyItMatters}. Action: ${insight.nextAction} (${insight.timebox})`;
+          });
+        } else {
+          insightsArray = aiResponse.insights.filter(i => typeof i === 'string');
+          if (aiResponse.insightsStructured && Array.isArray(aiResponse.insightsStructured)) {
+            structuredInsights = aiResponse.insightsStructured;
+          }
+        }
+      }
+      
+      aiResponse.insights = insightsArray;
+      aiResponse.insightsStructured = structuredInsights;
+      
+      // Merge AI enhancements with pre-computed tasks
+      const enhancedTasks = {
+        bookDelivery: enhanceTaskList(preComputedTasks.bookDelivery || [], aiResponse.tasks?.bookDelivery || []),
+        monitorShipments: enhanceTaskList(preComputedTasks.monitorShipments || [], aiResponse.tasks?.monitorShipments || []),
+        followUpDesign: enhanceTaskList(preComputedTasks.followUpDesign || [], aiResponse.tasks?.followUpDesign || []),
+        followUpPaid: enhanceTaskList(preComputedTasks.followUpPaid || [], aiResponse.tasks?.followUpPaid || []),
+        collectReviews: enhanceTaskList(preComputedTasks.collectReviews || [], aiResponse.tasks?.collectReviews || [])
+      };
+      
+      console.log(`✅ AI enhancement complete: ${structuredInsights.length} insights, ${Object.keys(enhancedTasks).length} task categories`);
+      
+      return res.json({
+        success: true,
+        date: todayStr,
+        agent,
+        tasks: enhancedTasks,
+        insights: aiResponse.insights,
+        insightsStructured: aiResponse.insightsStructured,
+        warnings: aiResponse.warnings || [],
+        topPriorities: aiResponse.topPriorities || [],
+        recommendedOrder: aiResponse.recommendedOrder || [],
+        workload: aiResponse.workload || {},
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Original compute mode (fallback for backwards compatibility)
+    console.log(`📊 Computing tasks from scratch (legacy mode)...`);
 
     // Fetch only relevant orders (not all orders - just current/active ones)
     // Filter for orders that are: Paid, Design & Artworks, In Production, or Dispatched
