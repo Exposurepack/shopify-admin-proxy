@@ -55,6 +55,7 @@ let openaiModule = null;
 
 async function getOpenAIClient() {
   if (!OPENAI_API_KEY) {
+    console.log("⚠️ OPENAI_API_KEY is not set in environment variables");
     return null;
   }
   
@@ -63,16 +64,22 @@ async function getOpenAIClient() {
   }
   
   try {
+    console.log("🔄 Attempting to load OpenAI package...");
     if (!openaiModule) {
       openaiModule = await import("openai");
+      console.log("✅ OpenAI package imported successfully");
     }
     openaiClient = new openaiModule.default({ apiKey: OPENAI_API_KEY });
     console.log("✅ OpenAI client initialized - AI daily agenda features enabled");
     return openaiClient;
   } catch (error) {
-    console.warn("⚠️ OpenAI package not installed - AI daily agenda features will be disabled");
-    console.warn("   Install with: npm install openai");
-    console.warn("   Error:", error.message);
+    console.error("❌ Failed to initialize OpenAI client:");
+    console.error("   Error type:", error.constructor.name);
+    console.error("   Error message:", error.message);
+    console.error("   Error code:", error.code);
+    if (error.code === 'ERR_MODULE_NOT_FOUND') {
+      console.error("   → OpenAI package not installed. Run: npm install openai");
+    }
     return null;
   }
 }
