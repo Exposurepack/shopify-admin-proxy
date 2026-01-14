@@ -7718,22 +7718,62 @@ ${JSON.stringify(orderSummary.map(t => ({
   totalPrice: t.totalPrice,
   customerEmail: t.customerEmail,
   customerPhone: t.customerPhone || null,
+  customerName: t.customerName || null,
   expectedEndDate: t.expectedEndDate || null,
+  productionStartDate: t.productionStartDate || null,
+  dispatchByDate: t.dispatchByDate || null,
+  rushedTimeframe: t.rushedTimeframe || null,
+  actualProductionDays: t.actualProductionDays || null,
+  daysUntilDispatchBy: t.daysUntilDispatchBy || null,
+  dispatchDate: t.dispatchDate || null,
   deliveredDate: t.deliveredDate || null,
   daysSinceDelivered: t.daysSinceDelivered || null,
+  reviewRequestSent: t.reviewRequestSent || false,
   createdAt: t.createdAt || null
 })), null, 2)}
 
-Stage deadlines (Standard Timelines):
+CRITICAL: Production Timeframe & Dispatch-By Ranking Rules:
+- DO NOT assume 10 business days for production - use ACTUAL production timeframes from the data
+- For "In Production" orders (bookDelivery category):
+  * Use actualProductionDays if available (calculated from productionStartDate to expectedEndDate)
+  * Use rushedTimeframe if present (manual override for rushed orders)
+  * If dispatchByDate exists, prioritize ranking by daysUntilDispatchBy (negative = overdue, 0-2 = urgent, 3-5 = high priority)
+  * Rank orders with dispatchByDate approaching/past as HIGHEST priority
+  * Compare actualProductionDays vs standard (10-14 days) - flag if significantly longer
+- For "Dispatched" orders (monitorShipments category):
+  * Use dispatchDate to track how long since dispatch
+  * Flag if deliveredDate is missing and dispatchDate is >1 day ago
+
+Standard Timelines (fallback only if actual dates unavailable):
 - Paid → Design: 1 business day deadline
 - Design & Artworks: 3 days deadline (normal approval is 2-3 days, flag if >3)
-- In Production: 10 business days deadline
+- In Production: 10-14 business days typical (but USE actualProductionDays from data)
 - Dispatched: 1 day deadline
+
+Delivered Orders - Review Request Rules:
+- Only include orders delivered within the last 14 days
+- Exclude orders where review_request_sent is already true
+- Review request should be sent 2-3 days after delivery (optimal timing)
+- Include personalized email with order details and Google review link
+- Follow up if no response after 7 days
+- Mark review_request_sent metafield to true after sending
 
 YOUR TASK: Rank ALL ${totalTasks} tasks and provide analysis:
 1. Report: overview, patterns, risks (concise but comprehensive)
 2. Rank tasks 1..${totalTasks} by urgency
 3. For each task: ranking reason, deadline status, facts, root cause, impact, actions with scripts, follow-up, contacts
+
+SPECIAL RULES FOR DELIVERED ORDERS (collectReviews category):
+- These orders were delivered within the last 14 days and need review requests
+- Optimal timing: Send review request 2-3 days after delivery (if daysSinceDelivered is 2-3, mark as optimal timing)
+- Email should be personalized with order details (order number, business name, delivery date, customer name)
+- Include Google review link: https://g.page/r/CZZc1Ylo8_5TEBM/review
+- Email template style: Friendly, mention specific order details, ask for Google review with link
+- If daysSinceDelivered > 7, mark as urgent - customer may forget
+- If daysSinceDelivered < 2, mark as low priority - too soon after delivery
+- After sending email, mark review_request_sent metafield to true
+- Follow-up plan: If no response after 7 days, send reminder email
+- Script should include: Customer name, order number, mention of fast communication, Google review link, friendly closing
 
 CRITICAL RULES:
 - Output MUST contain EXACTLY ${totalTasks} items in ranked_tasks array
@@ -7742,6 +7782,12 @@ CRITICAL RULES:
 - Be DEEP and SPECIFIC - no generic advice
 - Every task must include evidence, what changed, what's blocking, exact actions with scripts
 - If data is missing (e.g. phone), call it out and propose best alternative channel
+- EMAIL/SCRIPT REQUIREMENTS: All scripts must be FULL, POLITE, PROFESSIONAL communications:
+  * Emails: Include proper greeting (Hi [Name],), context about the order, specific details (order number, business name, dates), clear but polite request, professional closing (Best regards, [Agent])
+  * Calls: Include friendly greeting, context, specific questions, professional closing
+  * NEVER use shortcuts like "need update for order #455678" - always write complete, courteous messages
+  * Use customer name, business name, order number, and relevant dates in all communications
+  * Match the tone: professional but friendly, Australian English spelling
 
 Return JSON with this EXACT structure (no extra keys):
 {
@@ -7774,7 +7820,7 @@ Return JSON with this EXACT structure (no extra keys):
           "owner": "Stefan|Tom|Both",
           "channel": "call|email|sms|internal",
           "target": "string|null",
-          "script": "string",
+          "script": "FULL EMAIL/CALL SCRIPT - Must be complete, polite, professional. For emails: include greeting, context, specific order details, clear request, closing. For calls: include opening, context, questions to ask, closing. NO shortcuts like 'need update for order #455678' - write full, courteous communication.",
           "success_criteria": "string"
         }
       ],
