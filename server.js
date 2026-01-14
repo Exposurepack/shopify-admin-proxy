@@ -7658,96 +7658,133 @@ function enhanceTaskList(legacyTasks, aiEnhancements) {
 
 // Build enhancement prompt (AI enhances pre-computed tasks)
 function buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agent, todayStr) {
-  return `You are an expert operations manager enhancing pre-computed daily tasks for ${todayStr}.
+  const totalTasks = (preComputedTasks.bookDelivery?.length || 0) +
+                     (preComputedTasks.monitorShipments?.length || 0) +
+                     (preComputedTasks.followUpDesign?.length || 0) +
+                     (preComputedTasks.followUpPaid?.length || 0) +
+                     (preComputedTasks.collectReviews?.length || 0);
+  
+  return `You are an expert operations manager analyzing ${totalTasks} pre-computed daily tasks for ${todayStr}.
 
-IMPORTANT: These tasks have already been computed using proven business logic. Your job is to ENHANCE them, not replace them.
+CRITICAL: You are receiving EXACTLY ${totalTasks} tasks. Your response MUST contain EXACTLY ${totalTasks} items in ranked_tasks array (rank 1..${totalTasks}, no gaps, no duplicates).
+
+IMPORTANT: These tasks have already been computed using proven business logic. Your job is to RANK and ENHANCE them with deep analysis, not replace them.
 
 Current date: ${new Date().toISOString()}
 Target date: ${targetDate.toISOString()}
 Agent filter: ${agent}
 
-Pre-computed tasks (from proven legacy logic):
+Pre-computed tasks breakdown (from proven legacy logic):
 - Book delivery: ${preComputedTasks.bookDelivery?.length || 0} orders
 - Monitor shipments: ${preComputedTasks.monitorShipments?.length || 0} orders
 - Follow up Design: ${preComputedTasks.followUpDesign?.length || 0} orders
 - Follow up Paid: ${preComputedTasks.followUpPaid?.length || 0} orders
 - Collect reviews: ${preComputedTasks.collectReviews?.length || 0} orders
+TOTAL: ${totalTasks} tasks
 
-Task details:
+Task details (ALL ${totalTasks} tasks):
 ${JSON.stringify(orderSummary, null, 2)}
 
-Stage SLAs (Standard Timelines):
-- Paid → Design: 1 business day
-- Design & Artworks: 3 days (normal approval is 2-3 days, flag if >3)
-- In Production: 10 business days
-- Dispatched: 1 day
+Stage deadlines (Standard Timelines):
+- Paid → Design: 1 business day deadline
+- Design & Artworks: 3 days deadline (normal approval is 2-3 days, flag if >3)
+- In Production: 10 business days deadline
+- Dispatched: 1 day deadline
 
-YOUR TASK: Enhance these pre-computed tasks with:
-1. Prioritization (high/medium/low) based on urgency, SLA breaches, deadlines
-2. Specific reasons why each task needs attention
-3. Step-by-step instructions for each task
-4. Urgency scores (0-100)
-5. Insights about critical issues (max 3)
-6. Warnings about potential problems
-7. Recommended execution order
+YOUR TASK: Create a deep, exhaustive analysis with:
+1. Report sections: overview, patterns, risks (long narrative allowed, no limits)
+2. Rank ALL ${totalTasks} tasks from most urgent to least urgent (rank 1..${totalTasks})
+3. For EACH task, provide deep analysis:
+   - Why it's ranked at this position (compare to other tasks)
+   - Deadline status (days overdue or due in X days)
+   - Facts: time in stage, order value, promised dates, latest events, missing fields
+   - Root cause hypothesis (grounded in data)
+   - Impact if ignored (concrete consequence)
+   - Next actions with FULL SCRIPTS (customer-facing and internal)
+   - Follow-up plan if no response
+   - Contact information
 
-CRITICAL INSIGHT GATING RULES:
-Generate an insight ONLY if at least one is TRUE:
-1. Order has exceeded stage SLA (check daysInStage vs thresholds)
-2. Deadline is critical (expectedEndDate is today/tomorrow)
-3. Order is blocking production (Design > 3 days)
-4. High-value order ($500+) with risk factors
+CRITICAL RULES:
+- Output MUST contain EXACTLY ${totalTasks} items in ranked_tasks array
+- NO separate "insights", "top priorities", or "warnings" sections - ranked_tasks is the single source of truth
+- Use "deadline" language ONLY - never say "SLA"
+- Be DEEP and SPECIFIC - no generic advice
+- Every task must include evidence, what changed, what's blocking, exact actions with scripts
+- If data is missing (e.g. phone), call it out and propose best alternative channel
 
-DO NOT generate insights for:
-- Orders within normal timelines
-- Routine workflow items without consequence
-- Orders with daysInStage < SLA threshold
-
-Maximum 3 insights total. If no orders meet criteria, return empty array: []
-
-Return JSON with this structure:
+Return JSON with this EXACT structure:
 {
-  "insights": [
-    {
-      "title": "Short title (max 60 chars)",
-      "whyItMatters": "Risk + consequence",
-      "nextAction": "Specific steps",
-      "timebox": "Next 2 hours / Today by 5pm",
-      "owner": "stefan|tom|both",
-      "missingInfo": "What's missing if applicable",
-      "orderId": "Order ID",
-      "orderName": "Order name",
-      "priority": "high|medium|low",
-      "priorityReason": "Why this is high priority"
-    }
-  ],
-  "tasks": {
-    "bookDelivery": [
-      {
-        "orderId": "string",
-        "orderName": "string",
-        "priority": "high|medium|low",
-        "reason": "SPECIFIC reason with consequence",
-        "urgencyScore": 0-100,
-        "instructions": "DETAILED step-by-step",
-        "deadline": "Specific deadline if applicable"
-      }
-    ],
-    "monitorShipments": [...],
-    "followUpDesign": [...],
-    "followUpPaid": [...],
-    "collectReviews": [...]
+  "date": "${todayStr}",
+  "report": {
+    "overview": "Long narrative summary of the day's workload, key themes, and overall status. No length limits.",
+    "patterns": "Long narrative about patterns you notice across tasks - common issues, trends, recurring problems. No length limits.",
+    "risks": "Long narrative about risks and potential problems if tasks aren't addressed. Be specific with consequences. No length limits."
   },
-  "warnings": ["Specific warnings with order details"],
-  "topPriorities": ["Top 3-5 most urgent tasks"],
-  "recommendedOrder": ["Array of order IDs in optimal execution order"],
-  "workload": {
-    "stefan": { "taskCount": number, "estimatedHours": number },
-    "tom": { "taskCount": number, "estimatedHours": number }
-  }
+  "ranked_tasks": [
+    {
+      "rank": 1,
+      "order_number": "23161317",
+      "order_id": "string or null",
+      "business_name": "string or null",
+      "stage": "Paid|Design & Artworks|In Production|Dispatched",
+      "deadline_label": "production deadline|artwork deadline|dispatch deadline",
+      "deadline_status": {
+        "days_overdue": 0,
+        "due_in_days": 3
+      },
+      "urgency_score": 85,
+      "why_this_is_ranked_here": "Deep explanation: This is ranked #1 because it's 33 days overdue on production deadline, blocking customer delivery promise, and is high-value ($1,200). Compared to task #2 which is only 7 days overdue, this has higher impact.",
+      "facts": {
+        "time_in_stage_days": 33,
+        "order_value": 1200,
+        "promised_date": "2026-01-15",
+        "latest_known_event": "Production started 2025-12-13",
+        "missing_fields": ["Customer phone number", "Supplier confirmation"]
+      },
+      "root_cause_hypothesis": "Production delay likely due to supplier capacity issues or missing artwork approval. Order has been in production for 33 days vs 10-day standard deadline.",
+      "impact_if_ignored": "Customer will miss delivery promise by 23+ days. High-value order risks cancellation. Reputation damage with repeat customer.",
+      "next_actions": [
+        {
+          "step": 1,
+          "action": "Call customer immediately",
+          "owner": "Stefan",
+          "channel": "call",
+          "target": "Customer name",
+          "script": "Hi [Name], this is Stefan from Exposure Pack. I'm calling about order #23161317. I wanted to update you that production is taking longer than expected - we're currently 23 days past our original deadline. I'm working with our supplier to expedite this, but I wanted to be transparent with you. Can we discuss a revised delivery timeline?",
+          "success_criteria": "Customer acknowledges delay and agrees to revised timeline"
+        },
+        {
+          "step": 2,
+          "action": "Contact supplier for status update",
+          "owner": "Stefan",
+          "channel": "internal",
+          "target": "Production supplier",
+          "script": "Hi, checking on order #23161317 - it's been 33 days in production, well past our 10-day deadline. What's the current status and when can we expect completion?",
+          "success_criteria": "Supplier provides completion date"
+        }
+      ],
+      "follow_up_plan": "If no response from customer within 24 hours, send email with timeline update. If supplier doesn't respond, escalate to production manager.",
+      "links": {
+        "shopify_admin_url": "https://admin.shopify.com/store/orders/[order_id]",
+        "hubspot_url": null
+      },
+      "customer_contact": {
+        "name": "Customer name",
+        "email": "customer@email.com",
+        "phone": null
+      }
+    }
+    // ... continue for ALL ${totalTasks} tasks, rank 1..${totalTasks}
+  ]
 }
 
-Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
+Remember:
+- ranked_tasks MUST have EXACTLY ${totalTasks} items
+- Each task appears EXACTLY ONCE
+- Use "deadline" not "SLA"
+- Be deep, specific, and actionable
+- Include full scripts for all communications
+- Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
 }
 
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
@@ -7848,6 +7885,7 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       aiResponse.insightsStructured = structuredInsights;
       
       // Merge AI enhancements with pre-computed tasks
+      // Return enhanced task summaries (frontend will map back to full orders)
       const enhancedTasks = {
         bookDelivery: enhanceTaskList(preComputedTasks.bookDelivery || [], aiResponse.tasks?.bookDelivery || []),
         monitorShipments: enhanceTaskList(preComputedTasks.monitorShipments || [], aiResponse.tasks?.monitorShipments || []),
