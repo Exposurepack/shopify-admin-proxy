@@ -7690,80 +7690,140 @@ function buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agen
                      (preComputedTasks.followUpPaid?.length || 0) +
                      (preComputedTasks.collectReviews?.length || 0);
   
-  // Condense task data - only send essential fields, compact format
-  const compactTasks = orderSummary.map(t => ({
-    id: t.orderId,
-    name: t.orderName,
-    biz: t.businessName,
-    stg: t.stage,
-    days: t.daysInStage,
-    val: t.totalPrice,
-    email: t.customerEmail,
-    phone: t.customerPhone || null,
-    cust: t.customerName || null,
-    end: t.expectedEndDate || null,
-    prodStart: t.productionStartDate || null,
-    dispatchBy: t.dispatchByDate || null,
-    rushed: t.rushedTimeframe || null,
-    prodDays: t.actualProductionDays || null,
-    daysToDispatch: t.daysUntilDispatchBy || null,
-    dispatched: t.dispatchDate || null,
-    delivered: t.deliveredDate || null,
-    daysDel: t.daysSinceDelivered || null,
-    reviewSent: t.reviewRequestSent || false
-  }));
-  
-  return `Analyze ${totalTasks} tasks for ${todayStr}. Return EXACTLY ${totalTasks} ranked_tasks.
+  return `You are an expert operations manager analyzing ${totalTasks} pre-computed daily tasks for ${todayStr}.
 
-RANKING PRIORITY:
-- Production: Use prodDays (not 10-day assumption). If dispatchBy exists, rank by daysToDispatch (negative=overdue=highest, 0-2=urgent).
-- Dispatched: Flag if delivered missing and dispatched >1 day ago.
-- Reviews: Optimal 2-3 days after delivery. >7 days = urgent.
+CRITICAL: You are receiving EXACTLY ${totalTasks} tasks. Your response MUST contain EXACTLY ${totalTasks} items in ranked_tasks array (rank 1..${totalTasks}, no gaps, no duplicates).
 
-EMAIL SCRIPTS: Full, polite, professional. Include greeting, context, order details, request, closing. NO shortcuts.
+IMPORTANT: These tasks have already been computed using proven business logic. Your job is to RANK and ENHANCE them with deep analysis, not replace them.
 
-TASKS:
-${JSON.stringify(compactTasks)}
+Current date: ${new Date().toISOString()}
+Target date: ${targetDate.toISOString()}
+Agent filter: ${agent}
 
-RETURN JSON:
+Pre-computed tasks breakdown (from proven legacy logic):
+- Book delivery: ${preComputedTasks.bookDelivery?.length || 0} orders
+- Monitor shipments: ${preComputedTasks.monitorShipments?.length || 0} orders
+- Follow up Design: ${preComputedTasks.followUpDesign?.length || 0} orders
+- Follow up Paid: ${preComputedTasks.followUpPaid?.length || 0} orders
+- Collect reviews: ${preComputedTasks.collectReviews?.length || 0} orders
+TOTAL: ${totalTasks} tasks
+
+Task details (ALL ${totalTasks} tasks - essential fields only):
+${JSON.stringify(orderSummary.map(t => ({
+  orderId: t.orderId,
+  orderName: t.orderName,
+  businessName: t.businessName,
+  stage: t.stage,
+  daysInStage: t.daysInStage,
+  totalPrice: t.totalPrice,
+  customerEmail: t.customerEmail,
+  customerPhone: t.customerPhone || null,
+  customerName: t.customerName || null,
+  expectedEndDate: t.expectedEndDate || null,
+  productionStartDate: t.productionStartDate || null,
+  dispatchByDate: t.dispatchByDate || null,
+  actualProductionDays: t.actualProductionDays || null,
+  daysUntilDispatchBy: t.daysUntilDispatchBy !== null && t.daysUntilDispatchBy !== undefined ? t.daysUntilDispatchBy : null,
+  deliveredDate: t.deliveredDate || null,
+  daysSinceDelivered: t.daysSinceDelivered || null,
+  reviewRequestSent: t.reviewRequestSent || false,
+  createdAt: t.createdAt || null
+})), null, 2)}
+
+RANKING PRIORITY RULES:
+- In Production: Use actualProductionDays (actual production time) NOT 10-day assumption. If dispatchByDate exists, rank by daysUntilDispatchBy: negative=overdue=highest priority, 0-2 days=urgent, 3-5 days=high priority.
+- Dispatched: Flag if deliveredDate missing and daysInStage >1.
+- Reviews: Optimal 2-3 days after delivery. >7 days=urgent, <2 days=low priority.
+
+Delivered Orders - Review Request Rules:
+- Only include orders delivered within the last 14 days
+- Exclude orders where review_request_sent is already true
+- Review request should be sent 2-3 days after delivery (optimal timing)
+- Include personalized email with order details and Google review link
+- Follow up if no response after 7 days
+- Mark review_request_sent metafield to true after sending
+
+YOUR TASK: Rank ALL ${totalTasks} tasks and provide analysis:
+1. Report: overview, patterns, risks (concise but comprehensive)
+2. Rank tasks 1..${totalTasks} by urgency
+3. For each task: ranking reason, deadline status, facts, root cause, impact, actions with scripts, follow-up, contacts
+
+SPECIAL RULES FOR DELIVERED ORDERS (collectReviews category):
+- These orders were delivered within the last 14 days and need review requests
+- Optimal timing: Send review request 2-3 days after delivery (if daysSinceDelivered is 2-3, mark as optimal timing)
+- Email should be personalized with order details (order number, business name, delivery date, customer name)
+- Include Google review link: https://g.page/r/CZZc1Ylo8_5TEBM/review
+- Email template style: Friendly, mention specific order details, ask for Google review with link
+- If daysSinceDelivered > 7, mark as urgent - customer may forget
+- If daysSinceDelivered < 2, mark as low priority - too soon after delivery
+- After sending email, mark review_request_sent metafield to true
+- Follow-up plan: If no response after 7 days, send reminder email
+- Script should include: Customer name, order number, mention of fast communication, Google review link, friendly closing
+
+EMAIL SCRIPT REQUIREMENTS:
+- Write FULL, POLITE, PROFESSIONAL emails - not brief messages
+- Include: greeting, context/background, specific order details, clear request, friendly closing
+- Example BAD: "need a update for order #455678"
+- Example GOOD: "Hi [Name], I hope you're doing well. I'm reaching out regarding order #455678 for [Business Name]. I wanted to check in on the status and see if you need any updates. Please let me know if you have any questions. Best regards, [Agent]"
+- Be warm, professional, and helpful - never abrupt or demanding
+
+CRITICAL RULES:
+- Output MUST contain EXACTLY ${totalTasks} items in ranked_tasks array
+- NO separate "insights", "top priorities", or "warnings" sections - ranked_tasks is the single source of truth
+- Use "deadline" language ONLY - never say "SLA"
+- Be DEEP and SPECIFIC - no generic advice
+- Every task must include evidence, what changed, what's blocking, exact actions with FULL email scripts
+- If data is missing (e.g. phone), call it out and propose best alternative channel
+
+Return JSON with this EXACT structure (no extra keys):
 {
   "date": "${todayStr}",
-  "report": {"overview": "...", "patterns": "...", "risks": "..."},
+  "report": { "overview": "string", "patterns": "string", "risks": "string" },
   "ranked_tasks": [
     {
       "rank": 1,
       "order_number": "string",
       "order_id": "string|null",
       "business_name": "string|null",
-      "stage": "Paid|Design & Artworks|In Production|Dispatched|Delivered",
-      "deadline_label": "string",
-      "deadline_status": {"days_overdue": number, "due_in_days": number|null},
+      "stage": "Paid|Design & Artworks|In Production|Dispatched",
+      "deadline_label": "production deadline|artwork deadline|dispatch deadline",
+      "deadline_status": { "days_overdue": number, "due_in_days": number|null },
       "urgency_score": number,
-      "why_this_is_ranked_here": "brief explanation",
+      "why_this_is_ranked_here": "string",
       "facts": {
         "time_in_stage_days": number|null,
         "order_value": number|null,
         "promised_date": "string|null",
         "latest_known_event": "string|null",
-        "missing_fields": ["string"]
+        "missing_fields": ["string", "..."]
       },
-      "root_cause_hypothesis": "brief",
-      "impact_if_ignored": "brief",
-      "next_actions": [{
-        "step": 1,
-        "action": "string",
-        "owner": "Stefan|Tom|Both",
-        "channel": "call|email|sms|internal",
-        "target": "string|null",
-        "script": "FULL polite email/call script with greeting, context, details, request, closing",
-        "success_criteria": "string"
-      }],
-      "follow_up_plan": "brief",
-      "links": {"shopify_admin_url": null, "hubspot_url": null},
-      "customer_contact": {"name": "string|null", "email": "string|null", "phone": "string|null"}
+      "root_cause_hypothesis": "string",
+      "impact_if_ignored": "string",
+      "next_actions": [
+        {
+          "step": number,
+          "action": "string",
+          "owner": "Stefan|Tom|Both",
+          "channel": "call|email|sms|internal",
+          "target": "string|null",
+          "script": "string",
+          "success_criteria": "string"
+        }
+      ],
+      "follow_up_plan": "string",
+      "links": { "shopify_admin_url": "string|null", "hubspot_url": "string|null" },
+      "customer_contact": { "name": "string|null", "email": "string|null", "phone": "string|null" }
     }
   ]
-}`;
+}
+
+Remember:
+- ranked_tasks MUST have EXACTLY ${totalTasks} items
+- Each task appears EXACTLY ONCE
+- Use "deadline" not "SLA"
+- Be deep, specific, and actionable
+- Include full scripts for all communications
+- Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
 }
 
 app.post("/ai/daily-agenda", authenticate, async (req, res) => {
@@ -7807,36 +7867,13 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       console.log(`   Collect reviews: ${preComputedTasks.collectReviews?.length || 0}`);
       
       // Use pre-computed tasks directly - AI will enhance them
-      let orderSummary = [
+      const orderSummary = [
         ...(preComputedTasks.bookDelivery || []),
         ...(preComputedTasks.monitorShipments || []),
         ...(preComputedTasks.followUpDesign || []),
         ...(preComputedTasks.followUpPaid || []),
         ...(preComputedTasks.collectReviews || [])
       ];
-
-      // Limit tasks if too many to prevent timeout
-      const MAX_TASKS_FOR_AI = 30;
-      let limitedTasks = preComputedTasks;
-      if (orderSummary.length > MAX_TASKS_FOR_AI) {
-        console.warn(`⚠️ Too many tasks (${orderSummary.length}), limiting to ${MAX_TASKS_FOR_AI} for AI processing`);
-        // Prioritize: overdue dispatch-by first, then by order value
-        orderSummary.sort((a, b) => {
-          const aOverdue = a.daysUntilDispatchBy !== null && a.daysUntilDispatchBy < 0 ? 1 : 0;
-          const bOverdue = b.daysUntilDispatchBy !== null && b.daysUntilDispatchBy < 0 ? 1 : 0;
-          if (aOverdue !== bOverdue) return bOverdue - aOverdue;
-          return (b.totalPrice || 0) - (a.totalPrice || 0);
-        });
-        orderSummary = orderSummary.slice(0, MAX_TASKS_FOR_AI);
-        // Rebuild limited tasks object
-        limitedTasks = {
-          bookDelivery: orderSummary.filter(t => t.stage === 'In Production').slice(0, 15),
-          monitorShipments: orderSummary.filter(t => t.stage === 'Dispatched').slice(0, 5),
-          followUpDesign: orderSummary.filter(t => t.stage === 'Design & Artworks').slice(0, 5),
-          followUpPaid: orderSummary.filter(t => t.stage === 'Paid').slice(0, 3),
-          collectReviews: orderSummary.filter(t => t.stage === 'Delivered').slice(0, 2)
-        };
-      }
 
       // Check cache to avoid repeated AI calls for identical task sets
       const cacheKey = `${targetDate.toISOString().split('T')[0]}|${agent}|${hashString(JSON.stringify(orderSummary))}`;
@@ -7848,7 +7885,7 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
       
       // Build AI prompt for enhancement mode
       const todayStr = targetDate.toISOString().split('T')[0];
-      const prompt = buildEnhancementPrompt(orderSummary, limitedTasks, targetDate, agent, todayStr);
+      const prompt = buildEnhancementPrompt(orderSummary, preComputedTasks, targetDate, agent, todayStr);
       
       // Call AI for enhancement
       const completion = await Promise.race([
@@ -7866,9 +7903,9 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
           ],
           response_format: { type: "json_object" },
           temperature: 0.3,
-          max_tokens: 5000 // Reduced for faster processing - prompt is now more compact
+          max_tokens: 6000 // Reduced for faster processing while maintaining quality
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 90 seconds')), 90000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 120 seconds')), 120000))
       ]);
       
       const aiResponse = JSON.parse(completion.choices[0].message.content);
@@ -8436,9 +8473,9 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
-    // Add timeout wrapper for OpenAI API call (90 seconds max)
+    // Add timeout wrapper for OpenAI API call (120 seconds max)
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('OpenAI API request timed out after 90 seconds')), 90000);
+      setTimeout(() => reject(new Error('OpenAI API request timed out after 120 seconds')), 120000);
     });
     
     const aiCallPromise = openai.chat.completions.create({
@@ -8509,7 +8546,7 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
     if (error.message.includes('timed out')) {
       return res.status(504).json({
         error: "AI request timeout",
-        message: "The AI analysis took longer than 90 seconds. This may happen with many tasks. Please try again.",
+        message: "The AI analysis took longer than 120 seconds. This may happen with many tasks. Please try again.",
         timestamp: new Date().toISOString()
       });
     }
