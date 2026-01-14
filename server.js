@@ -7856,57 +7856,68 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
           ],
           response_format: { type: "json_object" },
           temperature: 0.3,
-          max_tokens: 4000
+          max_tokens: 8000 // Increased for deep, exhaustive analysis of all tasks
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 45 seconds')), 45000))
       ]);
       
       const aiResponse = JSON.parse(completion.choices[0].message.content);
       
-      // Transform structured insights
-      let insightsArray = [];
-      let structuredInsights = [];
+      // Validate response has correct number of ranked tasks
+      const expectedTaskCount = orderSummary.length;
+      const actualTaskCount = aiResponse.ranked_tasks?.length || 0;
       
-      if (Array.isArray(aiResponse.insights)) {
-        if (aiResponse.insights.length > 0 && typeof aiResponse.insights[0] === 'object' && aiResponse.insights[0].title) {
-          structuredInsights = aiResponse.insights;
-          insightsArray = aiResponse.insights.map(insight => {
-            return `${insight.title}: ${insight.whyItMatters}. Action: ${insight.nextAction} (${insight.timebox})`;
-          });
-        } else {
-          insightsArray = aiResponse.insights.filter(i => typeof i === 'string');
-          if (aiResponse.insightsStructured && Array.isArray(aiResponse.insightsStructured)) {
-            structuredInsights = aiResponse.insightsStructured;
-          }
-        }
+      if (actualTaskCount !== expectedTaskCount) {
+        console.warn(`⚠️ AI returned ${actualTaskCount} tasks but expected ${expectedTaskCount}`);
       }
       
-      aiResponse.insights = insightsArray;
-      aiResponse.insightsStructured = structuredInsights;
+      // Map ranked_tasks back to original task categories for backwards compatibility
+      // Create a map of orderId -> task category
+      const orderToCategory = {};
+      preComputedTasks.bookDelivery?.forEach(t => orderToCategory[t.orderId] = 'bookDelivery');
+      preComputedTasks.monitorShipments?.forEach(t => orderToCategory[t.orderId] = 'monitorShipments');
+      preComputedTasks.followUpDesign?.forEach(t => orderToCategory[t.orderId] = 'followUpDesign');
+      preComputedTasks.followUpPaid?.forEach(t => orderToCategory[t.orderId] = 'followUpPaid');
+      preComputedTasks.collectReviews?.forEach(t => orderToCategory[t.orderId] = 'collectReviews');
       
-      // Merge AI enhancements with pre-computed tasks
-      // Return enhanced task summaries (frontend will map back to full orders)
+      // Group ranked tasks by category
       const enhancedTasks = {
-        bookDelivery: enhanceTaskList(preComputedTasks.bookDelivery || [], aiResponse.tasks?.bookDelivery || []),
-        monitorShipments: enhanceTaskList(preComputedTasks.monitorShipments || [], aiResponse.tasks?.monitorShipments || []),
-        followUpDesign: enhanceTaskList(preComputedTasks.followUpDesign || [], aiResponse.tasks?.followUpDesign || []),
-        followUpPaid: enhanceTaskList(preComputedTasks.followUpPaid || [], aiResponse.tasks?.followUpPaid || []),
-        collectReviews: enhanceTaskList(preComputedTasks.collectReviews || [], aiResponse.tasks?.collectReviews || [])
+        bookDelivery: [],
+        monitorShipments: [],
+        followUpDesign: [],
+        followUpPaid: [],
+        collectReviews: []
       };
       
-      console.log(`✅ AI enhancement complete: ${structuredInsights.length} insights, ${Object.keys(enhancedTasks).length} task categories`);
+      if (aiResponse.ranked_tasks) {
+        aiResponse.ranked_tasks.forEach(rankedTask => {
+          const orderId = rankedTask.order_id || rankedTask.order_number;
+          const category = orderToCategory[orderId] || 'bookDelivery';
+          
+          // Find original task data
+          const originalTask = orderSummary.find(t => 
+            String(t.orderId) === String(orderId) || 
+            String(t.orderName) === String(rankedTask.order_number)
+          );
+          
+          // Merge ranked task data with original task
+          enhancedTasks[category].push({
+            ...originalTask,
+            _rank: rankedTask.rank,
+            _rankedTask: rankedTask // Full ranked task data
+          });
+        });
+      }
+      
+      console.log(`✅ AI enhancement complete: ${actualTaskCount} ranked tasks, report sections: ${aiResponse.report ? Object.keys(aiResponse.report).length : 0}`);
       
       return res.json({
         success: true,
-        date: todayStr,
+        date: aiResponse.date || todayStr,
         agent,
-        tasks: enhancedTasks,
-        insights: aiResponse.insights,
-        insightsStructured: aiResponse.insightsStructured,
-        warnings: aiResponse.warnings || [],
-        topPriorities: aiResponse.topPriorities || [],
-        recommendedOrder: aiResponse.recommendedOrder || [],
-        workload: aiResponse.workload || {},
+        report: aiResponse.report || { overview: '', patterns: '', risks: '' },
+        ranked_tasks: aiResponse.ranked_tasks || [],
+        tasks: enhancedTasks, // Backwards compatibility
         timestamp: new Date().toISOString()
       });
     }
