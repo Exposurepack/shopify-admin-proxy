@@ -7682,8 +7682,21 @@ Pre-computed tasks breakdown (from proven legacy logic):
 - Collect reviews: ${preComputedTasks.collectReviews?.length || 0} orders
 TOTAL: ${totalTasks} tasks
 
-Task details (ALL ${totalTasks} tasks):
-${JSON.stringify(orderSummary, null, 2)}
+Task details (ALL ${totalTasks} tasks - essential fields only):
+${JSON.stringify(orderSummary.map(t => ({
+  orderId: t.orderId,
+  orderName: t.orderName,
+  businessName: t.businessName,
+  stage: t.stage,
+  daysInStage: t.daysInStage,
+  totalPrice: t.totalPrice,
+  customerEmail: t.customerEmail,
+  customerPhone: t.customerPhone || null,
+  expectedEndDate: t.expectedEndDate || null,
+  deliveredDate: t.deliveredDate || null,
+  daysSinceDelivered: t.daysSinceDelivered || null,
+  createdAt: t.createdAt || null
+})), null, 2)}
 
 Stage deadlines (Standard Timelines):
 - Paid → Design: 1 business day deadline
@@ -7691,18 +7704,10 @@ Stage deadlines (Standard Timelines):
 - In Production: 10 business days deadline
 - Dispatched: 1 day deadline
 
-YOUR TASK: Create a deep, exhaustive analysis with:
-1. Report sections: overview, patterns, risks (long narrative allowed, no limits)
-2. Rank ALL ${totalTasks} tasks from most urgent to least urgent (rank 1..${totalTasks})
-3. For EACH task, provide deep analysis:
-   - Why it's ranked at this position (compare to other tasks)
-   - Deadline status (days overdue or due in X days)
-   - Facts: time in stage, order value, promised dates, latest events, missing fields
-   - Root cause hypothesis (grounded in data)
-   - Impact if ignored (concrete consequence)
-   - Next actions with FULL SCRIPTS (customer-facing and internal)
-   - Follow-up plan if no response
-   - Contact information
+YOUR TASK: Rank ALL ${totalTasks} tasks and provide analysis:
+1. Report: overview, patterns, risks (concise but comprehensive)
+2. Rank tasks 1..${totalTasks} by urgency
+3. For each task: ranking reason, deadline status, facts, root cause, impact, actions with scripts, follow-up, contacts
 
 CRITICAL RULES:
 - Output MUST contain EXACTLY ${totalTasks} items in ranked_tasks array
@@ -7856,9 +7861,9 @@ app.post("/ai/daily-agenda", authenticate, async (req, res) => {
           ],
           response_format: { type: "json_object" },
           temperature: 0.3,
-          max_tokens: 8000 // Increased for deep, exhaustive analysis of all tasks
+          max_tokens: 6000 // Reduced for faster processing while maintaining quality
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 45 seconds')), 45000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OpenAI API request timed out after 90 seconds')), 90000))
       ]);
       
       const aiResponse = JSON.parse(completion.choices[0].message.content);
@@ -8421,9 +8426,9 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
 
     console.log(`🤖 Calling OpenAI API with ${orderSummary.length} orders...`);
     
-    // Add timeout wrapper for OpenAI API call (45 seconds max)
+    // Add timeout wrapper for OpenAI API call (90 seconds max)
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('OpenAI API request timed out after 45 seconds')), 45000);
+      setTimeout(() => reject(new Error('OpenAI API request timed out after 90 seconds')), 90000);
     });
     
     const aiCallPromise = openai.chat.completions.create({
@@ -8494,7 +8499,7 @@ Focus on ${agent === 'all' ? 'all agents' : `agent ${agent}`}`;
     if (error.message.includes('timed out')) {
       return res.status(504).json({
         error: "AI request timeout",
-        message: "The AI analysis took too long. Try again or reduce the number of orders.",
+        message: "The AI analysis took longer than 90 seconds. This may happen with many tasks. Please try again.",
         timestamp: new Date().toISOString()
       });
     }
