@@ -7765,5 +7765,6 @@ app.listen(PORT, () => {
   console.log("   📡 GET  /wholesale-profit-data/stream - Wholesale profit (live streaming)");
   console.log("   💾 POST /wholesale/actuals/bulk-save - Save wholesale actuals");
   console.log("   📥 GET  /wholesale-profit-export-csv - Export wholesale CSV");
+  console.log("   🤖 POST /ai/daily-agenda - AI-powered daily task predictions");
   console.log("✅ ===============================================");
 }); 
