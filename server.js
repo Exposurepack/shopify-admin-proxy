@@ -1513,6 +1513,74 @@ function shouldSyncCustomerToHubSpot(customer, order = null) {
 }
 
 /**
+ * Async version that fetches customer orders from Shopify API when needed
+ * Used when customer webhook doesn't include orders_count
+ * 
+ * @param {Object} customer - Shopify customer object
+ * @param {Object} order - Optional Shopify order object (if syncing from order webhook)
+ * @returns {Promise<Object>} - { shouldSync: boolean, reason: string }
+ */
+async function shouldSyncCustomerToHubSpotAsync(customer, order = null) {
+  // If no customer data, allow sync (edge case - shouldn't happen)
+  if (!customer || !customer.id) {
+    return { shouldSync: true, reason: 'no_customer_data' };
+  }
+
+  // Check for bot-suspected tag
+  const isBotSuspected = hasBotSuspectedTag(customer);
+  
+  if (!isBotSuspected) {
+    return { shouldSync: true, reason: 'no_bot_tag' };
+  }
+
+  // Self-healing: If customer has placed an order, allow sync
+  if (order && order.id) {
+    return { 
+      shouldSync: true, 
+      reason: 'self_healing_order_placed',
+      note: 'Customer has bot-suspected tag but placed an order - allowing sync'
+    };
+  }
+
+  // Check if customer has orders (via customer.orders_count if available)
+  if (customer.orders_count && parseInt(customer.orders_count) > 0) {
+    return { 
+      shouldSync: true, 
+      reason: 'self_healing_has_orders',
+      note: 'Customer has bot-suspected tag but has existing orders - allowing sync'
+    };
+  }
+
+  // Fetch orders from Shopify API to verify if customer has any orders
+  // This is needed because customer webhooks may not include orders_count
+  try {
+    const customerId = customer.id;
+    // Use REST API to check for orders (more reliable than GraphQL for this check)
+    const ordersResponse = await restClient.get(`/customers/${customerId}/orders.json?limit=1&status=any`);
+    const hasOrders = Array.isArray(ordersResponse.orders) && ordersResponse.orders.length > 0;
+    
+    if (hasOrders) {
+      return { 
+        shouldSync: true, 
+        reason: 'self_healing_has_orders',
+        note: 'Customer has bot-suspected tag but has existing orders (fetched from API) - allowing sync'
+      };
+    }
+  } catch (fetchError) {
+    // If we can't fetch orders, err on the side of caution and block sync
+    // Log the error but don't throw - we'll block the sync
+    console.warn(`⚠️ Could not fetch orders for customer ${customer.id} to verify bot status:`, fetchError.message);
+  }
+
+  // Block sync: customer has bot-suspected tag and no orders
+  return { 
+    shouldSync: false, 
+    reason: 'bot_suspected_no_orders',
+    note: 'Customer has bot-suspected tag and no orders - blocking HubSpot sync'
+  };
+}
+
+/**
  * Logs bot blocker activity for observability
  * Non-blocking, production-safe logging
  * 
@@ -2012,6 +2080,17 @@ async function createHubSpotInvoiceSafe(invoiceProps) {
 async function createPaidHubSpotInvoiceFromShopifyOrder(order, deal) {
   if (!HUBSPOT_PRIVATE_APP_TOKEN || !hubspotClient || !hubspotRateLimited) {
     console.log("⚠️ HubSpot not configured - cannot create invoice");
+    return null;
+  }
+
+  // Bot blocker guard: Check if customer should be synced to HubSpot
+  // Even though invoice creation happens after deal creation (which already has guard),
+  // this provides defensive protection if invoice creation is called directly
+  const customer = order.customer || {};
+  const syncDecision = shouldSyncCustomerToHubSpot(customer, order);
+  if (!syncDecision.shouldSync) {
+    logBotBlockerActivity('blocked', { customer, order }, syncDecision.reason);
+    console.log(`🚫 Invoice creation blocked for order ${order.name}: ${syncDecision.reason}`);
     return null;
   }
 
@@ -5793,7 +5872,8 @@ app.post("/shopify-customer-webhook", async (req, res) => {
     }
 
     // Bot blocker guard: Check if customer should be synced to HubSpot
-    const syncDecision = shouldSyncCustomerToHubSpot(customer);
+    // Use async version to fetch orders from Shopify API if needed
+    const syncDecision = await shouldSyncCustomerToHubSpotAsync(customer);
     if (!syncDecision.shouldSync) {
       logBotBlockerActivity('blocked', { customer }, syncDecision.reason);
       // Mark as processed to prevent retries, but do not sync to HubSpot
