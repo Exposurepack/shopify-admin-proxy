@@ -5359,6 +5359,69 @@ app.all("/analytics-data", async (req, res) => {
           console.log(`📅 Filtered to date range: ${orders.length} orders`);
         }
         
+        // Enrich orders with metafields (especially supplier_name)
+        console.log(`🔍 Fetching metafields for ${orders.length} orders...`);
+        try {
+          const metafieldsQuery = `
+            query GetOrderMetafields($ids: [ID!]!) {
+              nodes(ids: $ids) {
+                ... on Order {
+                  id
+                  legacyResourceId
+                  metafields(first: 30, namespace: "custom") {
+                    edges {
+                      node {
+                        key
+                        value
+                        type
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `;
+          
+          // Fetch metafields in batches of 50 (GraphQL limit)
+          const batchSize = 50;
+          const metafieldsMap = {};
+          
+          for (let i = 0; i < orders.length; i += batchSize) {
+            const batch = orders.slice(i, i + batchSize);
+            const orderGIDs = batch.map(order => `gid://shopify/Order/${order.id}`);
+            
+            try {
+              const metafieldsData = await graphqlClient.query(metafieldsQuery, { ids: orderGIDs });
+              const nodes = metafieldsData.data?.nodes || [];
+              
+              nodes.forEach(node => {
+                if (node && node.legacyResourceId) {
+                  const metafields = {};
+                  (node.metafields?.edges || []).forEach(edge => {
+                    metafields[edge.node.key] = edge.node.value;
+                  });
+                  metafieldsMap[node.legacyResourceId] = metafields;
+                }
+              });
+            } catch (batchError) {
+              console.warn(`⚠️ Failed to fetch metafields for batch ${i}-${i + batchSize}:`, batchError.message);
+            }
+          }
+          
+          // Attach metafields to orders
+          orders = orders.map(order => {
+            const metafields = metafieldsMap[order.id] || {};
+            return {
+              ...order,
+              metafields: metafields
+            };
+          });
+          
+          console.log(`✅ Enriched ${orders.length} orders with metafields`);
+        } catch (metafieldsError) {
+          console.warn(`⚠️ Failed to fetch metafields, continuing without them:`, metafieldsError.message);
+        }
+        
         analyticsData = {
           source: 'shopify',
           orders: orders,
